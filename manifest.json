@@ -1,0 +1,52 @@
+{
+  "manifest_version": 3,
+  "name": "X/Twitter 原图下载器",
+  "version": "1.0.0",
+  "description": "一键下载X.com(Twitter)帖子中的最高画质原图和视频，支持PNG格式4096x4096分辨率，悬停预览大图、即时切换、批量下载 - 2026年更新版",
+  "permissions": [
+    "downloads",
+    "activeTab",
+    "scripting",
+    "cookies",
+    "storage"
+  ],
+  "host_permissions": [
+    "https://x.com/*",
+    "https://twitter.com/*",
+    "https://pbs.twimg.com/*",
+    "https://video.twimg.com/*",
+    "https://api.fxtwitter.com/*",
+    "https://syndication.twitter.com/*"
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://x.com/*",
+        "https://twitter.com/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "css": [
+        "content.css"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "background": {
+    "service_worker": "background.js"
+  }
+}

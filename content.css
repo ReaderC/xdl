@@ -1,0 +1,465 @@
+/* X/Twitter 原图下载器 - 内容脚本样式 */
+
+/* ==================== 图片下载按钮样式 ==================== */
+.x-original-download-btn {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 36px;
+  height: 36px;
+  background: rgba(29, 155, 240, 0.9);
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  opacity: 0;
+  transition: all 0.2s ease;
+  z-index: 1000;
+  color: white;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+}
+
+.x-original-download-btn:hover {
+  background: rgba(29, 155, 240, 1);
+  transform: scale(1.1);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+}
+
+.x-original-download-btn:active {
+  transform: scale(0.95);
+}
+
+.x-original-download-btn svg {
+  width: 20px;
+  height: 20px;
+}
+
+/* ==================== 视频下载按钮样式 ==================== */
+.x-video-download-btn {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 36px;
+  height: 36px;
+  background: rgba(29, 155, 240, 0.9);
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  opacity: 0;
+  transition: all 0.2s ease;
+  z-index: 1000;
+  color: white;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+}
+
+.x-video-download-btn:hover {
+  background: rgba(29, 155, 240, 1);
+  transform: scale(1.1);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+}
+
+.x-video-download-btn:active {
+  transform: scale(0.95);
+}
+
+.x-video-download-btn svg {
+  width: 18px;
+  height: 18px;
+}
+
+/* ==================== GIF下载按钮样式 ==================== */
+.x-gif-download-btn {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 36px;
+  height: 36px;
+  background: rgba(156, 39, 176, 0.9);
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  opacity: 0;
+  transition: all 0.2s ease;
+  z-index: 1000;
+  color: white;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+}
+
+.x-gif-download-btn:hover {
+  background: rgba(156, 39, 176, 1);
+  transform: scale(1.1);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+}
+
+.x-gif-download-btn:active {
+  transform: scale(0.95);
+}
+
+.x-gif-download-btn svg {
+  width: 18px;
+  height: 18px;
+}
+
+/* 加载动画 */
+.x-loading-spinner {
+  animation: x-spin 1s linear infinite;
+}
+
+@keyframes x-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+/* ==================== 悬停时显示按钮 ==================== */
+[data-testid="tweetPhoto"]:hover .x-original-download-btn,
+[data-testid="card.wrapper"]:hover .x-original-download-btn,
+a[href*="/photo/"]:hover .x-original-download-btn,
+[data-testid="videoComponent"]:hover .x-video-download-btn,
+[data-testid="videoPlayer"]:hover .x-video-download-btn,
+[data-testid="tweetPhoto"]:hover .x-video-download-btn,
+[data-testid="tweetPhoto"]:hover .x-gif-download-btn,
+/* 2026年新增选择器 - 覆盖更多容器类型 */
+div[aria-label*="Image"]:hover .x-original-download-btn,
+div[aria-label*="Video"]:hover .x-video-download-btn,
+div[aria-label*="GIF"]:hover .x-gif-download-btn,
+[role="group"]:hover .x-original-download-btn,
+[role="group"]:hover .x-video-download-btn,
+[role="group"]:hover .x-gif-download-btn {
+  opacity: 1;
+}
+
+/* 视频容器悬停显示按钮 */
+div[style*="video"]:hover .x-video-download-btn,
+article:has(video):hover .x-video-download-btn,
+article:has(video):hover .x-gif-download-btn {
+  opacity: 1;
+}
+
+/* 确保按钮在图片容器内正确显示 */
+[data-testid="tweetPhoto"],
+[data-testid="card.wrapper"],
+a[href*="/photo/"],
+[data-testid="videoComponent"],
+[data-testid="videoPlayer"] {
+  position: relative;
+}
+
+/* ==================== 画质选择菜单样式 ==================== */
+.x-quality-menu {
+  position: fixed;
+  background: rgba(30, 30, 40, 0.98);
+  border-radius: 8px;
+  padding: 6px 0;
+  min-width: 140px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  z-index: 10000;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+
+.x-quality-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 14px;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.x-quality-item-hover,
+.x-quality-item:hover {
+  background: rgba(29, 155, 240, 0.2);
+}
+
+.x-quality-name {
+  color: #fff;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.x-quality-desc {
+  color: #8899a6;
+  font-size: 11px;
+}
+
+/* ==================== 图片预览窗口样式 ==================== */
+.x-image-preview {
+  position: fixed;
+  z-index: 999998;
+  pointer-events: none;
+  opacity: 0;
+  transform: scale(0.98);
+  transition: opacity 0.1s ease-out, transform 0.1s ease-out;
+}
+
+.x-image-preview.x-preview-visible {
+  opacity: 1;
+  transform: scale(1);
+  pointer-events: auto;
+}
+
+/* 跟随鼠标模式样式 */
+.x-image-preview.x-preview-visible .x-preview-follow-mode {
+  pointer-events: none;
+}
+
+.x-preview-content.x-preview-follow-mode {
+  /* 跟随模式下更紧凑的样式 */
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+}
+
+/* 跟随鼠标模式下的提示文字 */
+.x-preview-follow-hint {
+  position: absolute;
+  bottom: 8px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(0, 0, 0, 0.7);
+  color: rgba(255, 255, 255, 0.9);
+  padding: 4px 10px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  pointer-events: none;
+  white-space: nowrap;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+
+.x-image-preview.x-preview-visible:hover .x-preview-follow-hint,
+.x-image-preview.x-preview-visible .x-preview-follow-hint {
+  opacity: 1;
+}
+
+.x-preview-content {
+  position: relative;
+  background: #000;
+  border-radius: 12px;
+  overflow: hidden;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.x-preview-image {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  transition: opacity 0.1s ease;
+}
+
+.x-preview-gif {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: #000;
+}
+
+/* 预览加载状态 */
+.x-preview-loading {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.8);
+  color: white;
+  font-size: 14px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+
+.x-preview-spinner {
+  width: 32px;
+  height: 32px;
+  border: 3px solid rgba(255, 255, 255, 0.2);
+  border-top-color: #1d9bf0;
+  border-radius: 50%;
+  animation: x-spin 0.8s linear infinite;
+  margin-bottom: 12px;
+}
+
+/* 缩放信息显示 */
+.x-preview-scale-info {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  background: rgba(0, 0, 0, 0.7);
+  color: white;
+  padding: 8px 16px;
+  border-radius: 6px;
+  font-size: 16px;
+  font-weight: 600;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  display: none;
+  pointer-events: none;
+}
+
+/* 预览操作按钮 */
+.x-preview-actions {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: flex;
+  gap: 8px;
+}
+
+/* 跟随鼠标模式下的操作按钮 */
+.x-preview-actions-follow {
+  position: absolute;
+  top: 8px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 8px;
+  z-index: 10;
+}
+
+.x-preview-actions-follow .x-preview-btn {
+  width: 36px;
+  height: 36px;
+}
+
+.x-preview-btn {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(29, 155, 240, 0.9);
+  color: white;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.1s ease;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+}
+
+.x-preview-btn:hover {
+  background: rgba(29, 155, 240, 1);
+  transform: scale(1.1);
+}
+
+.x-preview-btn:active {
+  transform: scale(0.95);
+}
+
+.x-preview-close {
+  background: rgba(0, 0, 0, 0.6);
+}
+
+.x-preview-close:hover {
+  background: rgba(244, 33, 46, 0.9);
+}
+
+/* 预览窗口下载按钮包装器 */
+.x-preview-download-wrapper {
+  position: relative;
+}
+
+/* 预览窗口画质菜单 */
+.x-preview-quality-menu {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  margin-top: 4px;
+  background: rgba(30, 30, 40, 0.98);
+  border-radius: 8px;
+  padding: 4px 0;
+  min-width: 100px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  display: none;
+  z-index: 10;
+}
+
+.x-preview-quality-item {
+  padding: 8px 14px;
+  color: white;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.15s ease;
+  white-space: nowrap;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+
+.x-preview-quality-item:hover {
+  background: rgba(29, 155, 240, 0.3);
+}
+
+/* 预览提示文字 */
+.x-preview-hint {
+  position: absolute;
+  bottom: 8px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(0, 0, 0, 0.6);
+  color: rgba(255, 255, 255, 0.7);
+  padding: 4px 10px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+
+.x-image-preview.x-preview-visible:hover .x-preview-hint {
+  opacity: 1;
+}
+
+/* ==================== 通知样式 ==================== */
+.x-download-notification {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  padding: 12px 24px;
+  border-radius: 8px;
+  color: white;
+  font-size: 14px;
+  font-weight: 500;
+  z-index: 999999;
+  opacity: 0;
+  transform: translateY(10px);
+  transition: all 0.15s ease;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+
+.x-download-notification.show {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.x-download-success {
+  background: linear-gradient(135deg, #1d9bf0, #0d8bd9);
+}
+
+.x-download-error {
+  background: linear-gradient(135deg, #f4212e, #d91c28);
+}
+
+/* ==================== 深色模式适配 ==================== */
+@media (prefers-color-scheme: dark) {
+  .x-original-download-btn,
+  .x-video-download-btn {
+    background: rgba(29, 155, 240, 0.85);
+  }
+  
+  .x-original-download-btn:hover,
+  .x-video-download-btn:hover {
+    background: rgba(29, 155, 240, 1);
+  }
+  
+  .x-preview-content {
+    border-color: rgba(255, 255, 255, 0.2);
+  }
+}
