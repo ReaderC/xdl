@@ -36,6 +36,18 @@
       background: #ffffff;
       color: var(--twitter-black);
       overflow-y: auto;
+      overflow-x: hidden;
+      border-radius: 16px;
+      scrollbar-width: none;
+      -ms-overflow-style: none;
+    }
+
+    html {
+      border-radius: 16px;
+      overflow: hidden;
+      background: #ffffff;
+      scrollbar-width: none;
+      -ms-overflow-style: none;
     }
 
     /* Header */
@@ -86,6 +98,8 @@
     /* Main Content */
     .content {
       padding: 16px;
+      scrollbar-width: none;
+      -ms-overflow-style: none;
     }
 
     .section {
@@ -372,22 +386,13 @@
       color: var(--twitter-gray);
     }
 
-    /* Scrollbar */
-    ::-webkit-scrollbar {
-      width: 6px;
-    }
-
-    ::-webkit-scrollbar-track {
-      background: transparent;
-    }
-
-    ::-webkit-scrollbar-thumb {
-      background: var(--twitter-border);
-      border-radius: 3px;
-    }
-
-    ::-webkit-scrollbar-thumb:hover {
-      background: var(--twitter-gray);
+    /* Hide Scrollbar */
+    html::-webkit-scrollbar,
+    body::-webkit-scrollbar,
+    .content::-webkit-scrollbar {
+      width: 0;
+      height: 0;
+      display: none;
     }
 
     /* Animation */
@@ -463,6 +468,26 @@
           </div>
           <label class="toggle-switch">
             <input type="checkbox" id="enablePreview" checked>
+            <span class="toggle-slider"></span>
+          </label>
+        </div>
+        <div class="setting-item">
+          <div class="setting-info">
+            <div class="setting-label">图片预览</div>
+            <div class="setting-desc">仅控制图片悬停预览，不影响下载按钮</div>
+          </div>
+          <label class="toggle-switch">
+            <input type="checkbox" id="enableImagePreview" checked>
+            <span class="toggle-slider"></span>
+          </label>
+        </div>
+        <div class="setting-item">
+          <div class="setting-info">
+            <div class="setting-label">GIF预览</div>
+            <div class="setting-desc">仅控制GIF悬停预览，不影响下载按钮</div>
+          </div>
+          <label class="toggle-switch">
+            <input type="checkbox" id="enableGifPreview" checked>
             <span class="toggle-slider"></span>
           </label>
         </div>

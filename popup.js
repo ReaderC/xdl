@@ -3,6 +3,8 @@
 document.addEventListener('DOMContentLoaded', function () {
   // 获取DOM元素
   const enablePreview = document.getElementById('enablePreview');
+  const enableImagePreview = document.getElementById('enableImagePreview');
+  const enableGifPreview = document.getElementById('enableGifPreview');
   const previewTriggerMode = document.getElementById('previewTriggerMode');
   const previewTriggerKey = document.getElementById('previewTriggerKey');
   const triggerKeyItem = document.getElementById('triggerKeyItem');
@@ -22,6 +24,8 @@ document.addEventListener('DOMContentLoaded', function () {
   // 默认设置
   const defaultSettings = {
     enablePreview: true,
+    enableImagePreview: true,
+    enableGifPreview: true,
     previewTriggerMode: 'auto',
     previewTriggerKey: 'shift',
     previewDelay: 300,
@@ -33,6 +37,8 @@ document.addEventListener('DOMContentLoaded', function () {
   function loadSettings() {
     chrome.storage.sync.get(defaultSettings, (items) => {
       enablePreview.checked = items.enablePreview;
+      enableImagePreview.checked = items.enableImagePreview;
+      enableGifPreview.checked = items.enableGifPreview;
       previewTriggerMode.value = items.previewTriggerMode;
       previewTriggerKey.value = items.previewTriggerKey;
       previewDelay.value = items.previewDelay;
@@ -51,6 +57,8 @@ document.addEventListener('DOMContentLoaded', function () {
 
   // 开关切换时自动保存
   enablePreview.addEventListener('change', saveSettings);
+  enableImagePreview.addEventListener('change', saveSettings);
+  enableGifPreview.addEventListener('change', saveSettings);
   previewTriggerMode.addEventListener('change', saveSettings);
   previewTriggerKey.addEventListener('change', saveSettings);
   previewDelay.addEventListener('change', saveSettings);
@@ -60,6 +68,8 @@ document.addEventListener('DOMContentLoaded', function () {
   function saveSettings() {
     const settings = {
       enablePreview: enablePreview.checked,
+      enableImagePreview: enableImagePreview.checked,
+      enableGifPreview: enableGifPreview.checked,
       previewTriggerMode: previewTriggerMode.value,
       previewTriggerKey: previewTriggerKey.value,
       previewDelay: parseInt(previewDelay.value),

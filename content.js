@@ -1,4 +1,4 @@
-// X/Twitter 原图下载器 - 内容脚本
+﻿// X/Twitter 原图下载器 - 内容脚本
 (function () {
   'use strict';
 
@@ -6,6 +6,8 @@
   let userSettings = {
     imageQuality: '4096x4096',
     enablePreview: true,
+    enableImagePreview: true,
+    enableGifPreview: true,
     previewShortcut: 'none',
     previewDelay: 300,
     previewTriggerMode: 'auto',  // 'auto' = 自动显示, 'key' = 按键触发
@@ -18,6 +20,8 @@
     chrome.storage.sync.get({
       imageQuality: '4096x4096',
       enablePreview: true,
+      enableImagePreview: true,
+      enableGifPreview: true,
       previewShortcut: 'none',
       previewDelay: 300,
       previewTriggerMode: 'auto',
@@ -57,15 +61,18 @@
     GIF_BUTTON_CLASS: 'x-gif-download-btn',
     PREVIEW_CLASS: 'x-image-preview',
     PREVIEW_DELAY: 300,
-    PROCESSED_ATTR: 'data-x-downloader-processed'
+    IMAGE_PROCESSED_ATTR: 'data-x-image-processed',
+    VIDEO_PROCESSED_ATTR: 'data-x-video-processed'
   };
 
-  // 辅助函数获取用户设置
+  // 辅助函数：读取用户设置
   function getEnablePreview() { return userSettings.enablePreview; }
+  function getEnableImagePreview() { return userSettings.enableImagePreview !== false; }
+  function getEnableGifPreview() { return userSettings.enableGifPreview !== false; }
   function getImageQuality() { return userSettings.imageQuality; }
   function getPreviewFollowMouse() { return true; } // 始终跟随鼠标
 
-  // 检查是否满足触发预览的条件（按键模式）
+  // 检查是否满足预览触发条件（按键模式）
   function checkTriggerCondition(event) {
     if (userSettings.previewTriggerMode !== 'key') return true;
 
@@ -76,24 +83,60 @@
     return true;
   }
 
-  // 预览相关
+  function isHoveringPreviewExcludedControl(container, event) {
+    const suppressedSelector = [
+      `.${CONFIG.BUTTON_CLASS}`,
+      `.${CONFIG.VIDEO_BUTTON_CLASS}`,
+      `.${CONFIG.GIF_BUTTON_CLASS}`,
+      '.x-quality-menu',
+      '.x-quality-item',
+      '.x-preview-quality-menu',
+      '.x-preview-quality-item'
+    ].join(', ');
+
+    const hoverSelector = [
+      `.${CONFIG.BUTTON_CLASS}:hover`,
+      `.${CONFIG.VIDEO_BUTTON_CLASS}:hover`,
+      `.${CONFIG.GIF_BUTTON_CLASS}:hover`,
+      '.x-quality-menu:hover',
+      '.x-preview-quality-menu:hover'
+    ].join(', ');
+
+    const elementUnderPointer = event && Number.isFinite(event.clientX) && Number.isFinite(event.clientY)
+      ? document.elementFromPoint(event.clientX, event.clientY)
+      : null;
+
+    if (elementUnderPointer?.closest?.(suppressedSelector)) {
+      return true;
+    }
+
+    if (container?.querySelector?.(hoverSelector)) {
+      return true;
+    }
+
+    return !!document.querySelector(hoverSelector);
+  }
+
+  // 预览相关状态
   let previewElement = null;
   let previewTimeout = null;
   let currentPreviewUrl = null;
   let currentPreviewImg = null;
   let currentPreviewGif = null;
+  let previewLoadToken = 0;
   let previewScale = 1;
   let isPreviewVisible = false;
   let basePreviewWidth = 0;
   let basePreviewHeight = 0;
   let previewHideTimer = null;
-  let activePreviewTarget = null; // 当前预览的目标元素
+  let activePreviewTarget = null; // 当前预览目标元素
   let previewFollowMouseHandler = null; // 跟随鼠标移动的事件处理器
-  let isTransitioningToPreview = false; // 是否正在从图片过渡到预览窗口
-  let isPreviewPinned = false; // 预览窗口是否被固定（跟随鼠标模式下按空格键固定）
-  let isInImageViewer = false; // 是否在X的大图查看器中
-  let currentImageList = []; // 当前推文中的图片列表
-  let currentImageIndex = 0; // 当前预览图片在列表中的索引
+  let isTransitioningToPreview = false; // 是否正在从媒体过渡到预览窗口
+  let isPreviewPinned = false; // 预览窗口是否已固定（跟随模式下按空格固定）
+  let isInImageViewer = false;
+  let currentImageList = [];
+  let currentImageIndex = 0;
+  let previewFollowSide = 'right';
 
   // 拖动相关
   let isDragging = false;
@@ -103,7 +146,7 @@
   let previewStartY = 0;
 
   /**
-   * 获取图片URL
+   * 获取图片 URL
    */
   function getImageUrl(url, quality) {
     try {
@@ -120,7 +163,7 @@
   }
 
   /**
-   * 获取预览URL
+   * 获取预览 URL
    */
   function getPreviewUrl(url) {
     try {
@@ -149,7 +192,7 @@
   }
 
   /**
-   * 提取推文ID
+   * 提取推文 ID
    */
   function extractTweetId(element) {
     const urlMatch = window.location.href.match(/\/status\/(\d+)/);
@@ -192,7 +235,7 @@
   /**
    * 获取当前推文中的所有图片
    * @param {Element} element 起始元素
-   * @returns {Array} 图片URL数组
+   * @returns {Array} 图片 URL 数组
    */
   function getTweetImages(element) {
     const images = [];
@@ -201,7 +244,7 @@
     const article = element?.closest('article') || document.querySelector('article');
     if (!article) return images;
 
-    // 查找所有图片
+    // 收集当前推文中的所有图片
     const imgElements = article.querySelectorAll('img[src*="pbs.twimg.com/media"]');
     imgElements.forEach(img => {
       const url = img.src;
@@ -214,8 +257,8 @@
   }
 
   /**
-   * 切换到上一张/下一张图片
-   * @param {number} direction -1 上一张, 1 下一张
+   * 切换到上一张或下一张图片
+   * @param {number} direction -1 为上一张，1 为下一张
    */
   function switchImage(direction) {
     if (currentImageList.length <= 1) return;
@@ -226,7 +269,7 @@
     currentImageIndex = newIndex;
     const newUrl = currentImageList[currentImageIndex];
 
-    // 更新预览
+    // 更新预览内容
     if (previewElement && isPreviewVisible) {
       const previewImg = previewElement.querySelector('.x-preview-image');
       const previewGif = previewElement.querySelector('.x-preview-gif');
@@ -270,7 +313,7 @@
   }
 
   /**
-   * 显示/隐藏操作按钮（跟随鼠标模式）
+   * 显示或隐藏跟随模式下的操作按钮
    */
   function toggleFollowModeActions(show) {
     if (!previewElement || !getPreviewFollowMouse()) return;
@@ -282,19 +325,19 @@
   }
 
   /**
-   * 获取视频URL
+   * 获取视频 URL
    * @param {HTMLVideoElement} videoElement 视频元素
-   * @param {boolean} allowBlob 是否允许返回blob URL（用于GIF预览）
+   * @param {boolean} allowBlob 是否允许返回 blob URL（用于 GIF 预览）
    */
   function getVideoPlaylistUrl(videoElement, allowBlob = false) {
-    // 首先检查video元素的src
+    // 优先检查 video 元素自身的 src
     if (videoElement.src && videoElement.src.includes('video.twimg.com')) {
       if (!videoElement.src.startsWith('blob:') || allowBlob) {
         return videoElement.src;
       }
     }
 
-    // 检查source元素
+    // 检查 source 子元素
     const sources = videoElement.querySelectorAll('source');
     for (const source of sources) {
       if (source.src && source.src.includes('video.twimg.com')) {
@@ -304,7 +347,7 @@
       }
     }
 
-    // 对于GIF预览，尝试使用blob URL
+    // GIF 预览场景下，允许回退到 blob URL
     if (allowBlob && videoElement.src && videoElement.src.startsWith('blob:')) {
       return videoElement.src;
     }
@@ -313,12 +356,15 @@
   }
 
   /**
-   * 检查是否是GIF
+   * 妫€鏌ユ槸鍚︽槸GIF
    */
   function isGifVideo(videoElement) {
     const hasLoop = videoElement.loop;
     const hasMuted = videoElement.muted;
     const container = videoElement.closest('[data-testid="tweetPhoto"]');
+    const hasControls = !!videoElement.controls;
+    const hasAutoplay = !!videoElement.autoplay;
+    const poster = videoElement.getAttribute('poster') || '';
 
     if (container) {
       const gifBadge = container.querySelector('[class*="GIF"], [class*="gif"], [aria-label*="GIF"], [aria-label*="gif"]');
@@ -340,6 +386,13 @@
 
     const parentWithGifClass = videoElement.closest('[class*="gif-wrapper"], [class*="gif-container"], [data-testid*="gif"]');
     if (parentWithGifClass) return true;
+
+    // X 上的 GIF 往往表现为“无控件 + 循环自动播放”的 mp4
+    if (hasLoop && hasAutoplay && !hasControls) return true;
+    if (poster.includes('tweet_video_thumb')) return true;
+
+    // 回退策略：普通视频通常会显示视频控件
+    if (hasLoop && !hasControls) return true;
 
     if (!hasMuted && hasLoop) return false;
 
@@ -506,7 +559,7 @@
     previewElement = document.createElement('div');
     previewElement.className = CONFIG.PREVIEW_CLASS;
 
-    // 根据跟随鼠标模式决定HTML结构
+    // 根据是否跟随鼠标决定 HTML 结构
     if (isFollowMode) {
       previewElement.innerHTML = `
         <div class="x-preview-content x-preview-follow-mode">
@@ -543,15 +596,15 @@
 
     const content = previewElement.querySelector('.x-preview-content');
 
-    // 跟随鼠标模式：初始设置pointer-events为none
+    // 跟随鼠标模式：初始设置 pointer-events 为 none
     if (isFollowMode) {
       previewElement.style.pointerEvents = 'none';
 
-      // 跟随鼠标模式下添加滚轮缩放支持
-      // 固定后不需要Alt，未固定需要Alt
+      // 跟随鼠标模式下支持滚轮缩放
+      // 固定后不需要 Alt，未固定时需要 Alt
       previewElement.addEventListener('wheel', (e) => {
         if (!isPreviewVisible) return;
-        // 固定状态下直接缩放，未固定需要Alt
+        // 固定状态下直接缩放，未固定时需要 Alt
         if (!isPreviewPinned && !e.altKey) return;
 
         e.preventDefault();
@@ -570,11 +623,11 @@
         setTimeout(() => { scaleInfo.style.display = 'none'; }, 1500);
       }, { passive: false });
 
-      // 跟随鼠标模式下添加拖动支持（固定状态下）
+      // 跟随鼠标模式下支持拖动（仅固定状态生效）
       previewElement.addEventListener('mousedown', (e) => {
         if (!isPreviewPinned || !isPreviewVisible) return;
 
-        // 如果点击的是按钮，不触发拖动
+        // 点击的是按钮时，不触发拖动
         if (e.target.closest('.x-preview-btn')) return;
 
         isDragging = true;
@@ -636,9 +689,9 @@
       cancelHidePreview();
     });
 
-    // 鼠标离开时隐藏（如果正在过渡则忽略）
+    // 鼠标离开时隐藏；如果仍处于过渡阶段则忽略
     previewElement.addEventListener('mouseleave', (e) => {
-      // 如果正在从图片过渡到预览窗口，忽略mouseleave事件
+      // 如果正在从图片移动到预览窗口，忽略此次 mouseleave
       if (isTransitioningToPreview) {
         return;
       }
@@ -736,22 +789,31 @@
 
     previewImg.style.display = 'none';
     previewGif.style.display = 'none';
+    loading.innerHTML = '<div class="x-preview-spinner"></div><span>加载中...</span>';
     loading.style.display = 'flex';
     content.style.cursor = 'grab';
 
     previewScale = 1;
+    const token = ++previewLoadToken;
 
     if (isGif && gifUrl) {
       currentPreviewImg = null;
       currentPreviewGif = gifUrl;
 
-      previewGif.onload = () => {
+      const onGifReady = () => {
+        if (token !== previewLoadToken) return;
         loading.style.display = 'none';
         previewGif.style.display = 'block';
         positionPreview(preview, previewGif, x, y);
       };
-      previewGif.onerror = () => { loading.innerHTML = '<span>加载失败</span>'; };
+      previewGif.onerror = () => {
+        if (token !== previewLoadToken) return;
+        loading.innerHTML = '<span>加载失败</span>';
+      };
+      previewGif.addEventListener('loadeddata', onGifReady, { once: true });
+      previewGif.addEventListener('canplay', onGifReady, { once: true });
       previewGif.src = gifUrl;
+      previewGif.load();
     } else {
       currentPreviewImg = imageUrl;
       currentPreviewGif = null;
@@ -759,11 +821,15 @@
       const previewUrl = getPreviewUrl(imageUrl) || imageUrl;
 
       previewImg.onload = () => {
+        if (token !== previewLoadToken) return;
         loading.style.display = 'none';
         previewImg.style.display = 'block';
         positionPreview(preview, previewImg, x, y);
       };
-      previewImg.onerror = () => { loading.innerHTML = '<span>加载失败</span>'; };
+      previewImg.onerror = () => {
+        if (token !== previewLoadToken) return;
+        loading.innerHTML = '<span>加载失败</span>';
+      };
       previewImg.src = previewUrl;
     }
 
@@ -797,6 +863,44 @@
     updatePreviewContent(imageUrl, x, y, isGif, gifUrl);
   }
 
+  function getFollowPreviewPosition(x, y, previewWidth, previewHeight) {
+    const margin = 20;
+    const viewport = { width: window.innerWidth, height: window.innerHeight };
+
+    const rightLeft = x + 20;
+    const leftLeft = x - previewWidth - 20;
+    const rightFits = rightLeft + previewWidth <= viewport.width - margin;
+    const leftFits = leftLeft >= margin;
+
+    // 仅在当前停靠侧不可用时切换，避免左右晃动时突然跳边
+    if (previewFollowSide === 'right' && !rightFits && leftFits) {
+      previewFollowSide = 'left';
+    } else if (previewFollowSide === 'left' && !leftFits && rightFits) {
+      previewFollowSide = 'right';
+    }
+
+    let left = previewFollowSide === 'left' ? leftLeft : rightLeft;
+    const minLeft = margin;
+    const maxLeft = Math.max(margin, viewport.width - previewWidth - margin);
+    left = Math.min(Math.max(left, minLeft), maxLeft);
+
+    let top = y + 20;
+    const minTop = margin;
+    const maxTop = Math.max(margin, viewport.height - previewHeight - margin);
+    top = Math.min(Math.max(top, minTop), maxTop);
+
+    return { left, top };
+  }
+
+  function moveFollowPreviewToCursor(x, y) {
+    if (!previewElement) return;
+    const previewWidth = basePreviewWidth * previewScale;
+    const previewHeight = basePreviewHeight * previewScale;
+    const pos = getFollowPreviewPosition(x, y, previewWidth, previewHeight);
+    previewElement.style.left = `${pos.left}px`;
+    previewElement.style.top = `${pos.top}px`;
+  }
+
   /**
    * 定位预览窗口
    */
@@ -813,8 +917,8 @@
       naturalHeight = mediaElement.naturalHeight;
     }
 
-    // 跟随鼠标模式：最大化预览窗口，上下顶到浏览器边缘
-    const margin = 10; // 上下留10px边距
+    // 跟随鼠标模式：尽量放大预览窗口，并贴近浏览器上下边缘
+    const margin = 10; // 上下预留 10px 边距
     const maxHeight = viewport.height - margin * 2;
     const maxWidth = isFollowMode ? Math.min(viewport.width * 0.7, 900) : Math.min(viewport.width * 0.7, 800);
 
@@ -822,7 +926,7 @@
     let displayHeight = naturalHeight;
     const aspectRatio = naturalWidth / naturalHeight;
 
-    // 先按高度最大化
+    // 先按最大高度缩放
     if (displayHeight > maxHeight || isFollowMode) {
       displayHeight = maxHeight;
       displayWidth = displayHeight * aspectRatio;
@@ -839,20 +943,28 @@
     basePreviewWidth = displayWidth;
     basePreviewHeight = displayHeight;
 
-    // 跟随鼠标模式：预览窗口在鼠标右侧，垂直居中
+    // 跟随鼠标模式：优先保持初始停靠侧，避免在边界附近抖动跳边
     let left, top;
     if (isFollowMode) {
-      left = x + 20;
-      top = margin; // 顶部对齐边距
+      const rightLeft = x + 20;
+      const leftLeft = x - displayWidth - 20;
+      const rightFits = rightLeft + displayWidth <= viewport.width - margin;
+      const leftFits = leftLeft >= margin;
+      previewFollowSide = rightFits || !leftFits ? 'right' : 'left';
+      const pos = getFollowPreviewPosition(x, y, displayWidth, displayHeight);
+      left = pos.left;
+      top = pos.top;
     } else {
       left = x + 25;
       top = y - displayHeight / 2;
     }
 
-    if (left + displayWidth > viewport.width - margin) left = x - displayWidth - 20;
-    if (left < margin) left = margin;
-    if (top < margin) top = margin;
-    if (top + displayHeight > viewport.height - margin) top = viewport.height - displayHeight - margin;
+    if (!isFollowMode) {
+      if (left + displayWidth > viewport.width - margin) left = x - displayWidth - 20;
+      if (left < margin) left = margin;
+      if (top < margin) top = margin;
+      if (top + displayHeight > viewport.height - margin) top = viewport.height - displayHeight - margin;
+    }
 
     const content = preview.querySelector('.x-preview-content');
     content.style.width = `${displayWidth}px`;
@@ -862,7 +974,7 @@
   }
 
   /**
-   * 隐藏预览
+   * 闅愯棌预览
    */
   function hidePreview(delay = 0) {
     if (previewHideTimer) {
@@ -882,7 +994,7 @@
   function doHidePreview() {
     if (previewElement) {
       previewElement.classList.remove('x-preview-visible');
-      // 重置pointer-events为none（跟随鼠标模式）
+      // 重置 pointer-events 为 none（跟随鼠标模式）
       if (getPreviewFollowMouse()) {
         previewElement.style.pointerEvents = 'none';
         // 隐藏操作按钮
@@ -892,6 +1004,7 @@
       previewGif.pause();
       previewGif.src = '';
     }
+    previewLoadToken++;
     currentPreviewUrl = null;
     currentPreviewImg = null;
     currentPreviewGif = null;
@@ -903,6 +1016,7 @@
     isPreviewPinned = false; // 重置固定状态
     currentImageList = []; // 重置图片列表
     currentImageIndex = 0; // 重置图片索引
+    previewFollowSide = 'right';
   }
 
   /**
@@ -930,12 +1044,20 @@
     }, 3000);
   }
 
-  function isProcessed(container) {
-    return container.hasAttribute(CONFIG.PROCESSED_ATTR);
+  function isImageProcessed(container) {
+    return container.hasAttribute(CONFIG.IMAGE_PROCESSED_ATTR);
   }
 
-  function markProcessed(container) {
-    container.setAttribute(CONFIG.PROCESSED_ATTR, 'true');
+  function markImageProcessed(container) {
+    container.setAttribute(CONFIG.IMAGE_PROCESSED_ATTR, 'true');
+  }
+
+  function isVideoProcessed(container) {
+    return container.hasAttribute(CONFIG.VIDEO_PROCESSED_ATTR);
+  }
+
+  function markVideoProcessed(container) {
+    container.setAttribute(CONFIG.VIDEO_PROCESSED_ATTR, 'true');
   }
 
   /**
@@ -943,7 +1065,9 @@
    */
   function processImageContainer(container) {
     const img = container.querySelector('img[src*="pbs.twimg.com/media"]');
-    if (!img || isProcessed(container)) return;
+    if (!img || isImageProcessed(container)) return;
+    // GIF 容器通常同时包含 video 和首帧图，避免被图片流程抢先处理
+    if (container.querySelector('video')) return;
 
     const imageUrl = img.src;
     if (!imageUrl) return;
@@ -956,7 +1080,7 @@
     const btn = createDownloadButton(imageUrl);
     container.appendChild(btn);
 
-    markProcessed(container);
+    markImageProcessed(container);
     setupImagePreview(img, container);
   }
 
@@ -964,14 +1088,15 @@
    * 设置图片预览 - 即时切换版本
    */
   function setupImagePreview(img, container) {
-    if (!getEnablePreview()) return;
+    if (!getEnablePreview() || !getEnableImagePreview()) return;
 
     // 跟随鼠标模式的鼠标移动处理器
     let mouseMoveHandler = null;
 
-    container.addEventListener('mouseenter', (e) => {
+    img.addEventListener('mouseenter', (e) => {
       // 检查触发条件
       if (!checkTriggerCondition(e)) return;
+      if (isHoveringPreviewExcludedControl(container, e)) return;
 
       // 如果在大图查看器中，不显示预览
       if (isInImageViewer) return;
@@ -989,8 +1114,8 @@
       // 否则显示新预览
       if (!isPreviewVisible && img.src.includes('pbs.twimg.com/media')) {
         previewTimeout = setTimeout(() => {
-          // 再次检查是否在大图查看器中
-          if (isInImageViewer) return;
+          // 再次检查是否在大图查看器或悬停到下载控件上
+          if (isInImageViewer || isHoveringPreviewExcludedControl(container, e)) return;
 
           showPreview(img.src, e.clientX, e.clientY);
 
@@ -1000,23 +1125,7 @@
               if (previewElement && isPreviewVisible) {
                 // 如果预览窗口被固定，不更新位置
                 if (isPreviewPinned) return;
-
-                const viewport = { width: window.innerWidth, height: window.innerHeight };
-                let left = moveEvent.clientX + 20;
-                let top = moveEvent.clientY + 20;
-
-                // 边界检查
-                if (left + basePreviewWidth * previewScale > viewport.width - 20) {
-                  left = moveEvent.clientX - basePreviewWidth * previewScale - 20;
-                }
-                if (top + basePreviewHeight * previewScale > viewport.height - 20) {
-                  top = moveEvent.clientY - basePreviewHeight * previewScale - 20;
-                }
-                if (left < 20) left = 20;
-                if (top < 20) top = 20;
-
-                previewElement.style.left = `${left}px`;
-                previewElement.style.top = `${top}px`;
+                moveFollowPreviewToCursor(moveEvent.clientX, moveEvent.clientY);
               }
             };
             document.addEventListener('mousemove', mouseMoveHandler);
@@ -1026,7 +1135,7 @@
     });
 
 
-    container.addEventListener('mouseleave', () => {
+    img.addEventListener('mouseleave', () => {
       if (previewTimeout) {
         clearTimeout(previewTimeout);
         previewTimeout = null;
@@ -1057,7 +1166,7 @@
    * 处理视频容器
    */
   function processVideoContainer(container, videoElement = null, forcedIsGif = null) {
-    if (isProcessed(container)) return;
+    if (isVideoProcessed(container)) return;
 
     const video = videoElement || container.querySelector('video');
     if (!video) return;
@@ -1071,7 +1180,7 @@
     const btn = createDownloadButton(null, !isGif, video, isGif);
     container.appendChild(btn);
 
-    markProcessed(container);
+    markVideoProcessed(container);
 
     if (isGif) {
       setupGifPreview(video, container);
@@ -1079,14 +1188,16 @@
   }
 
   /**
-   * 设置GIF预览 - 即时切换版本
+   * 设置 GIF 预览 - 即时切换版本
    */
   function setupGifPreview(video, container) {
+    if (!getEnablePreview() || !getEnableGifPreview()) return;
     // 跟随鼠标模式的鼠标移动处理器
     let mouseMoveHandler = null;
 
-    container.addEventListener('mouseenter', (e) => {
+    video.addEventListener('mouseenter', (e) => {
       if (!checkTriggerCondition(e)) return;
+      if (isHoveringPreviewExcludedControl(container, e)) return;
 
       // 如果在大图查看器中，不显示预览
       if (isInImageViewer) return;
@@ -1094,7 +1205,7 @@
       cancelHidePreview();
       activePreviewTarget = container;
 
-      // 对于GIF预览，允许使用blob URL
+      // 对于 GIF 预览，允许使用 blob URL
       const videoUrl = getVideoPlaylistUrl(video, true);
       if (!videoUrl) return;
 
@@ -1105,8 +1216,8 @@
 
       if (!isPreviewVisible) {
         previewTimeout = setTimeout(() => {
-          // 再次检查是否在大图查看器中
-          if (isInImageViewer) return;
+          // 再次检查是否在大图查看器或悬停到下载控件上
+          if (isInImageViewer || isHoveringPreviewExcludedControl(container, e)) return;
 
           showPreview(null, e.clientX, e.clientY, true, videoUrl);
 
@@ -1116,23 +1227,7 @@
               if (previewElement && isPreviewVisible) {
                 // 如果预览窗口被固定，不更新位置
                 if (isPreviewPinned) return;
-
-                const viewport = { width: window.innerWidth, height: window.innerHeight };
-                let left = moveEvent.clientX + 20;
-                let top = moveEvent.clientY + 20;
-
-                // 边界检查
-                if (left + basePreviewWidth * previewScale > viewport.width - 20) {
-                  left = moveEvent.clientX - basePreviewWidth * previewScale - 20;
-                }
-                if (top + basePreviewHeight * previewScale > viewport.height - 20) {
-                  top = moveEvent.clientY - basePreviewHeight * previewScale - 20;
-                }
-                if (left < 20) left = 20;
-                if (top < 20) top = 20;
-
-                previewElement.style.left = `${left}px`;
-                previewElement.style.top = `${top}px`;
+                moveFollowPreviewToCursor(moveEvent.clientX, moveEvent.clientY);
               }
             };
             document.addEventListener('mousemove', mouseMoveHandler);
@@ -1142,7 +1237,7 @@
     });
 
 
-    container.addEventListener('mouseleave', () => {
+    video.addEventListener('mouseleave', () => {
       if (previewTimeout) {
         clearTimeout(previewTimeout);
         previewTimeout = null;
@@ -1259,7 +1354,7 @@
       img.closest('div[data-testid="previewInterstitial"]') ||
       img.parentElement?.parentElement;
 
-    if (container && !isProcessed(container)) {
+    if (container && !isImageProcessed(container)) {
       processImageContainer(container);
     }
   }
@@ -1295,7 +1390,7 @@
       container = video.parentElement?.parentElement || video.parentElement;
     }
 
-    if (container && !isProcessed(container)) {
+    if (container && !isVideoProcessed(container)) {
       const isGif = isGifVideo(video);
       processVideoContainer(container, video, isGif);
     }
@@ -1311,7 +1406,7 @@
   }
 
   /**
-   * 批量下载处理
+   * 批量下载澶勭悊
    */
   function handleBatchDownload(filters) {
     const { mediaTypes, quality, dateRange } = filters;
@@ -1387,12 +1482,12 @@
         if (completed === total) {
           showNotification(`批量下载完成！共 ${total} 个文件`, 'success');
         }
-      }, index * 500); // 500ms间隔避免限流
+      }, index * 500); // 500ms 间隔，避免限流
     });
   }
 
   /**
-   * 初始化Observer
+   * 初始化 Observer
    */
   function initObserver() {
     const observer = new MutationObserver((mutations) => {
@@ -1436,10 +1531,10 @@
       if (e.key === 'Escape') {
         hidePreview(0);
         hideQualityMenu();
-        // ESC键也取消固定状态
+        // ESC 键也会取消固定状态
         if (isPreviewPinned) {
           isPreviewPinned = false;
-          // 恢复pointer-events为none
+          // 恢复 pointer-events 为 none
           if (previewElement && getPreviewFollowMouse()) {
             previewElement.style.pointerEvents = 'none';
             // 隐藏操作按钮
@@ -1449,7 +1544,7 @@
         }
       }
 
-      // 左右方向键：切换图片（跟随鼠标模式固定状态下）
+      // 左右方向键：在跟随鼠标且固定状态下切换图片
       if (getPreviewFollowMouse() && isPreviewPinned && isPreviewVisible) {
         if (e.key === 'ArrowLeft') {
           e.preventDefault();
@@ -1465,8 +1560,8 @@
         }
       }
 
-      // 空格键：固定/恢复预览窗口（仅在跟随鼠标模式下）
-      // 使用 e.code 来检测空格键，更可靠
+      // 空格键：固定或恢复预览窗口（仅跟随鼠标模式下生效）
+      // 使用 e.code 检测空格键，更可靠
       if (e.code === 'Space') {
         const followMouse = getPreviewFollowMouse();
         console.log('[X下载器] 空格键按下, 跟随鼠标模式:', followMouse, '预览可见:', isPreviewVisible);
@@ -1479,17 +1574,17 @@
 
           isPreviewPinned = !isPreviewPinned;
 
-          // 固定时启用pointer-events，允许拖动和滚轮缩放
+          // 固定时启用 pointer-events，允许拖动和滚轮缩放
           if (previewElement) {
             previewElement.style.pointerEvents = isPreviewPinned ? 'auto' : 'none';
 
-            // 固定时设置cursor为grab
+            // 固定时将鼠标样式设为 grab
             const content = previewElement.querySelector('.x-preview-content');
             if (content) {
               content.style.cursor = isPreviewPinned ? 'grab' : 'default';
             }
 
-            // 显示/隐藏操作按钮
+            // 显示或隐藏操作按钮
             toggleFollowModeActions(isPreviewPinned);
             if (isPreviewPinned) {
               updateNavigationButtons();
@@ -1504,11 +1599,11 @@
     }, true); // 使用捕获阶段，确保事件优先处理
 
     // 全局滚轮事件：跟随鼠标模式下缩放
-    // 固定状态：直接滚轮缩放；未固定：需要Alt
+    // 固定状态下可直接缩放，未固定时需要按住 Alt
     document.addEventListener('wheel', (e) => {
       if (!isPreviewVisible || !getPreviewFollowMouse()) return;
 
-      // 固定状态下直接缩放，未固定需要Alt
+      // 固定状态下直接缩放，未固定时需要按住 Alt
       if (!isPreviewPinned && !e.altKey) return;
 
       e.preventDefault();
@@ -1531,7 +1626,7 @@
       }
     }, { passive: false });
 
-    // 全局鼠标移动事件：处理拖动（跟随鼠标模式固定状态下）
+    // 全局鼠标移动事件：处理拖动（跟随鼠标且固定状态下）
     document.addEventListener('mousemove', (e) => {
       if (!isDragging || !getPreviewFollowMouse()) return;
 
@@ -1580,16 +1675,16 @@
    * 检测大图查看器
    */
   function detectImageViewer() {
-    // X/Twitter的大图查看器特征：
-    // 1. URL变为 /photo/1 或类似格式
-    // 2. 页面上出现 [data-testid="tweetPhoto"] 的放大版本
-    // 3. 出现遮罩层
+    // X/Twitter 大图查看器的常见特征：
+    // 1. URL 变为 /photo/1 或类似格式
+    // 2. 页面上出现放大的 tweetPhoto 视图
+    // 3. 出现图片查看器对话框或遮罩层
 
     const checkImageViewer = () => {
-      // 检查URL是否包含 /photo/
+      // 检查 URL 是否包含 /photo/
       const isPhotoUrl = window.location.href.includes('/photo/');
 
-      // 检查是否存在大图查看器的遮罩层或容器
+      // 检查是否存在大图查看器弹层或对话框
       const hasImageViewerModal = document.querySelector('[data-testid="swipe-to-dismiss"]') ||
         document.querySelector('[data-testid="image-viewer"]') ||
         document.querySelector('[aria-label*="关闭"]')?.closest('[role="dialog"]');
@@ -1597,19 +1692,19 @@
       const wasInImageViewer = isInImageViewer;
       isInImageViewer = isPhotoUrl || !!hasImageViewerModal;
 
-      // 如果刚进入大图查看器，隐藏预览窗口
+      // 刚进入大图查看器时，立即隐藏预览窗口
       if (!wasInImageViewer && isInImageViewer) {
         hidePreview(0);
         isPreviewPinned = false;
       }
     };
 
-    // 监听URL变化（SPA路由，包括返回上一页）
+    // 监听 URL 变化（SPA 路由，包括返回上一页）
     let lastUrl = window.location.href;
     setInterval(() => {
       if (window.location.href !== lastUrl) {
         lastUrl = window.location.href;
-        // URL变化时，先关闭预览窗口（防止返回上一页后预览残留）
+        // URL 变化时先关闭预览，避免返回后残留
         if (isPreviewVisible) {
           hidePreview(0);
         }
@@ -1624,7 +1719,7 @@
       }
     });
 
-    // 监听DOM变化检测模态框
+    // 监听 DOM 变化，检测查看器弹层
     const observer = new MutationObserver(() => {
       checkImageViewer();
     });
@@ -1642,6 +1737,7 @@
       scannedCount: 0,
       downloadCount: 0,
       userName: '',
+      prevBodyOverflow: '',
       mediaMap: new Map() // url -> {filename, type, tweetId}
     },
 
@@ -1656,12 +1752,14 @@
     ui: {
       btn: null,
       modal: null,
-      overlay: null
+      overlay: null,
+      qualityOutsideHandler: null,
+      escHandler: null
     },
 
     init() {
       this.injectStyles();
-      // 监听URL变化，判断是否显示按钮
+      // 监听 URL 变化，判断是否显示按钮
       setInterval(() => this.checkPage(), 1000);
     },
 
@@ -1670,62 +1768,318 @@
       const style = document.createElement('style');
       style.id = 'x-batch-style';
       style.textContent = `
-        .x-batch-btn {
-          position: fixed;
-          bottom: 80px;
-          right: 30px;
-          width: 56px;
-          height: 56px;
-          border-radius: 50%;
-          background-color: #1d9bf0;
-          box-shadow: 0 4px 12px rgba(0,0,0,0.3);
-          display: flex;
-          align-items: center;
-          justify-content: center;
-          cursor: pointer;
-          z-index: 9999;
-          transition: transform 0.2s;
-          color: white;
+        :root {
+          --xui-blue: #1d9bf0;
+          --xui-blue-hover: #1a8cd8;
+          --xui-black: #0f1419;
+          --xui-gray: #536471;
+          --xui-light-gray: #eff3f4;
+          --xui-border: #cfd9de;
+          --xui-card-bg: #f7f9f9;
         }
-        .x-batch-btn:hover { transform: scale(1.05); background-color: #1a8cd8; }
+        [data-x-batch-profile-btn="true"] {
+          cursor: pointer;
+        }
         .x-batch-modal {
           position: fixed;
           top: 50%;
           left: 50%;
-          transform: translate(-50%, -50%);
-          background: #fff;
-          padding: 24px;
+          transform: translate(-50%, -48%) scale(0.96);
+          background: #ffffff;
+          padding: 0;
           border-radius: 16px;
-          box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+          border: 1px solid var(--xui-border);
+          box-shadow: 0 10px 28px rgba(15, 20, 25, 0.16);
           z-index: 10001;
-          width: 400px;
-          color: #0f1419;
+          width: 460px;
+          max-width: calc(100vw - 24px);
+          max-height: calc(100vh - 24px);
+          overflow: hidden;
+          color: var(--xui-black);
           font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+          color-scheme: light;
+          opacity: 0;
+          transition: opacity 0.18s ease, transform 0.22s cubic-bezier(0.2, 0.9, 0.2, 1);
+          scrollbar-width: none;
+          -ms-overflow-style: none;
+        }
+        .x-batch-modal.x-batch-visible {
+          opacity: 1;
+          transform: translate(-50%, -50%) scale(1);
         }
         .x-batch-overlay {
           position: fixed;
           top: 0; left: 0; right: 0; bottom: 0;
-          background: rgba(0,0,0,0.5);
+          background: rgba(15,20,25,0.45);
+          backdrop-filter: blur(4px);
           z-index: 10000;
         }
-        .x-batch-title { font-size: 20px; font-weight: bold; margin-bottom: 20px; }
-        .x-batch-group { margin-bottom: 16px; }
-        .x-batch-label { display: block; font-weight: 600; margin-bottom: 8px; font-size: 14px; }
-        .x-batch-row { display: flex; gap: 12px; align-items: center; }
-        .x-batch-input { width: 100%; padding: 8px 12px; border: 1px solid #cfd9de; border-radius: 4px; font-size: 14px; }
-        .x-batch-checkbox { margin-right: 8px; }
-        .x-batch-actions { display: flex; justify-content: flex-end; gap: 12px; margin-top: 24px; }
-        .x-batch-btn-primary { background: #0f1419; color: white; border: none; padding: 8px 16px; border-radius: 20px; cursor: pointer; font-weight: bold; }
-        .x-batch-btn-secondary { background: white; color: #0f1419; border: 1px solid #cfd9de; padding: 8px 16px; border-radius: 20px; cursor: pointer; font-weight: bold; }
+        .x-batch-header {
+          padding: 14px 16px;
+          border-bottom: 1px solid var(--xui-light-gray);
+          background: #fff;
+        }
+        .x-batch-headrow {
+          display: flex;
+          align-items: center;
+          gap: 12px;
+        }
+        .x-batch-header-icon {
+          width: 36px;
+          height: 36px;
+          border-radius: 50%;
+          background: linear-gradient(135deg, var(--xui-blue), #0d8bd9);
+          color: #fff;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          flex-shrink: 0;
+        }
+        .x-batch-header-icon svg {
+          width: 20px;
+          height: 20px;
+          fill: currentColor;
+        }
+        .x-batch-title { font-size: 24px; font-weight: 700; color: var(--xui-black); line-height: 1.1; }
+        .x-batch-subtitle { font-size: 12px; color: var(--xui-gray); margin-top: 4px; }
+        .x-batch-body { padding: 16px 16px 18px; }
+        .x-batch-body {
+          max-height: min(70vh, calc(100vh - 210px));
+          overflow-y: auto;
+          overflow-x: hidden;
+          padding-right: 4px;
+          scrollbar-width: none;
+          -ms-overflow-style: none;
+        }
+        .x-batch-modal::-webkit-scrollbar,
+        .x-batch-body::-webkit-scrollbar {
+          width: 0;
+          height: 0;
+          display: none;
+        }
+        .x-batch-group {
+          margin-bottom: 12px;
+          background: var(--xui-card-bg);
+          border-radius: 16px;
+          padding: 12px;
+          border: 1px solid var(--xui-light-gray);
+        }
+        .x-batch-label {
+          display: block;
+          font-weight: 700;
+          margin-bottom: 8px;
+          font-size: 12px;
+          color: #32536f;
+          text-transform: uppercase;
+          letter-spacing: 0.4px;
+        }
+        .x-batch-card { background: transparent; border: none; box-shadow: none; }
+        .x-batch-row {
+          display: flex;
+          gap: 12px;
+          align-items: center;
+          flex-wrap: wrap;
+          padding: 0;
+          border-bottom: none;
+        }
+        .x-batch-row:last-child { border-bottom: none; }
+        .x-batch-row label {
+          display: inline-flex;
+          align-items: center;
+          gap: 4px;
+          font-size: 13px;
+          font-weight: 600;
+          color: #213547;
+          background: transparent;
+          border: none;
+          border-radius: 0;
+          padding: 0;
+        }
+        .x-batch-input {
+          width: 100%;
+          padding: 10px 12px;
+          border: 1px solid #c8dff3;
+          border-radius: 10px;
+          font-size: 13px;
+          color: #0f1419 !important;
+          background: #ffffff !important;
+          -webkit-text-fill-color: #0f1419 !important;
+          appearance: none;
+          -webkit-appearance: none;
+          color-scheme: light;
+        }
+        .x-batch-select-wrap { position: relative; width: 100%; }
+        .x-batch-select-trigger {
+          width: 100%;
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          border: 1px solid #bfd8ee;
+          border-radius: 12px;
+          background: #fff;
+          color: #0f1419;
+          padding: 10px 12px;
+          font-size: 13px;
+          cursor: pointer;
+        }
+        .x-batch-select-trigger:hover { border-color: #91c3e8; }
+        .x-batch-select-trigger:focus {
+          outline: none;
+          border-color: var(--xui-blue);
+          box-shadow: 0 0 0 3px rgba(29,155,240,0.22);
+        }
+        .x-batch-select-caret {
+          width: 12px;
+          height: 12px;
+          color: #617384;
+          flex-shrink: 0;
+          transition: transform 0.15s ease;
+        }
+        .x-batch-select-wrap.open .x-batch-select-caret { transform: rotate(180deg); }
+        .x-batch-select-menu {
+          position: absolute;
+          left: 0;
+          right: 0;
+          top: calc(100% + 6px);
+          background: #fff;
+          border: 1px solid #bfd8ee;
+          border-radius: 12px;
+          box-shadow: 0 8px 24px rgba(15,20,25,0.12);
+          padding: 4px;
+          display: none;
+          z-index: 20;
+        }
+        .x-batch-select-wrap.open .x-batch-select-menu { display: block; }
+        .x-batch-select-item {
+          width: 100%;
+          border: none;
+          background: transparent;
+          text-align: left;
+          padding: 9px 10px;
+          border-radius: 8px;
+          color: #0f1419;
+          font-size: 13px;
+          cursor: pointer;
+        }
+        .x-batch-select-item:hover { background: #eff6fd; }
+        .x-batch-select-item.active { background: #e8f3ff; color: #0b73ba; font-weight: 600; }
+        input.x-batch-input,
+        select.x-batch-input,
+        input.x-batch-input[type="date"],
+        input.x-batch-input[type="text"] {
+          background-color: #ffffff !important;
+          color: #0f1419 !important;
+          border-color: #c8dff3 !important;
+        }
+        select.x-batch-input option {
+          background: #ffffff !important;
+          color: #0f1419 !important;
+        }
+        .x-batch-input:focus {
+          outline: none;
+          border-color: var(--xui-blue);
+          box-shadow: 0 0 0 3px rgba(29,155,240,0.22);
+        }
+        .x-batch-inline { display: flex; gap: 10px; align-items: center; width: 100%; }
+        .x-batch-inline > * { flex: 1; }
+        .x-batch-checkbox { margin-right: 6px; }
+        .x-batch-help { font-size: 12px; color: #597a96; margin-top: 6px; }
+        .x-batch-status {
+          margin-top: 14px;
+          display: none;
+          padding: 11px 12px;
+          background: #eaf5ff;
+          border: 1px solid #b8dfff;
+          border-radius: 12px;
+          font-size: 13px;
+          color: #18507a;
+          font-weight: 600;
+        }
+        .x-batch-actions {
+          display: flex;
+          justify-content: flex-end;
+          gap: 10px;
+          margin-top: 16px;
+        }
+        .x-batch-btn-primary {
+          background: linear-gradient(135deg, #1d9bf0 0%, #0d8bdd 100%);
+          color: white;
+          border: 1px solid #0f8de0;
+          padding: 10px 17px;
+          border-radius: 999px;
+          cursor: pointer;
+          font-weight: 700;
+        }
+        .x-batch-btn-primary:hover { background: linear-gradient(135deg, #1a8cd8 0%, #097fcd 100%); }
+        .x-batch-btn-secondary {
+          background: #fff;
+          color: var(--xui-black);
+          border: 1px solid #c8dff3;
+          padding: 10px 17px;
+          border-radius: 999px;
+          cursor: pointer;
+          font-weight: 700;
+        }
+        .x-batch-btn-secondary:hover { background: #f2f8fd; }
         .dark-mode .x-batch-modal { background: #000; color: #e7e9ea; border: 1px solid #2f3336; }
+        .dark-mode .x-batch-header { background: #000; border-bottom-color: #2f3336; }
+        .dark-mode .x-batch-title { color: #e7e9ea; }
+        .dark-mode .x-batch-subtitle { color: #8899a6; }
+        .dark-mode .x-batch-label, .dark-mode .x-batch-help { color: #8eb5d3; }
+        .dark-mode .x-batch-group { background: #0f1419; border-color: #2f3336; }
+        .dark-mode .x-batch-card { background: transparent; border-color: transparent; box-shadow: none; }
+        .dark-mode .x-batch-row { border-bottom-color: #2f3336; }
+        .dark-mode .x-batch-row label { background: #1b232a; border-color: #33414d; color: #dbe6ef; }
         .dark-mode .x-batch-input { background: #202327; border-color: #333639; color: white; }
+        .dark-mode .x-batch-status { background: #0f2536; border-color: #1f415a; color: #9ad3ff; }
         .dark-mode .x-batch-btn-secondary { background: transparent; color: white; border-color: #536471; }
+        .dark-mode .x-batch-btn-secondary:hover { background: rgba(255,255,255,0.08); }
       `;
       document.head.appendChild(style);
     },
 
+    findProfileMoreButton() {
+      const scopes = [];
+      const userActions = document.querySelector('[data-testid="userActions"]');
+      if (userActions) scopes.push(userActions);
+
+      const classRow = document.querySelector('div.css-175oi2r.r-obd0qt.r-18u37iz.r-1w6e6rj.r-1h0z5md.r-dnmrzs');
+      if (classRow) scopes.push(classRow);
+
+      // 兜底：在主列中查找，避免误命中侧栏按钮
+      const primaryColumn = document.querySelector('[data-testid="primaryColumn"]');
+      if (primaryColumn) scopes.push(primaryColumn);
+
+      const isMoreButton = (el) => {
+        if (!el || el.getAttribute('data-x-batch-profile-btn') === 'true') return false;
+        const label = `${el.getAttribute('aria-label') || ''} ${el.textContent || ''}`.toLowerCase();
+        if (label.includes('more') || label.includes('更多')) return true;
+        // X 常见的“更多”图标是三点
+        const path = el.querySelector('svg path')?.getAttribute('d') || '';
+        return path.includes('M3 12c0-1.1');
+      };
+
+      for (const scope of scopes) {
+        const candidates = Array.from(scope.querySelectorAll('button,[role="button"]'));
+        const moreButton = candidates.find(isMoreButton);
+        if (moreButton) return moreButton;
+      }
+
+      return null;
+    },
+
+    getInsertAnchor(moreButton) {
+      if (!moreButton) return null;
+      const parent = moreButton.parentElement;
+      if (!parent) return moreButton;
+
+      // 结构通常是“外层容器 > button”，优先插在容器级别
+      if (parent.children.length === 1) return parent;
+      return moreButton;
+    },
+
     checkPage() {
-      // 简单判断是否在用户主页 (包含 /username 且不包含 /status/)
+      // 简单判断是否在用户主页（包含 /username 且不包含 /status/）
       const path = window.location.pathname;
       const parts = path.split('/').filter(p => p);
       const isUserPage = parts.length > 0 &&
@@ -1734,7 +2088,7 @@
 
       if (isUserPage) {
         this.state.userName = parts[0];
-        if (!this.ui.btn) this.createButton();
+        if (!this.ui.btn || !this.ui.btn.isConnected) this.createButton();
       } else {
         if (this.ui.btn) {
           this.ui.btn.remove();
@@ -1744,26 +2098,55 @@
     },
 
     createButton() {
-      const btn = document.createElement('div');
-      btn.className = 'x-batch-btn';
-      btn.innerHTML = `<svg viewBox="0 0 24 24" width="24" height="24" fill="currentColor"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>`;
-      btn.title = '批量下载';
-      btn.onclick = () => this.openModal();
-      document.body.appendChild(btn);
+      if (this.ui.btn && this.ui.btn.isConnected) return;
+
+      const moreButton = this.findProfileMoreButton();
+      if (!moreButton || !moreButton.parentElement) return;
+
+      const anchor = this.getInsertAnchor(moreButton);
+      if (!anchor || !anchor.parentElement) return;
+
+      const btn = anchor.cloneNode(true);
+      btn.setAttribute('data-x-batch-profile-btn', 'true');
+      const clickable = btn.matches('button,[role="button"]')
+        ? btn
+        : btn.querySelector('button,[role="button"]');
+      if (!clickable) return;
+
+      clickable.setAttribute('data-x-batch-profile-btn', 'true');
+      clickable.setAttribute('aria-label', '\\u6279\\u91cf\\u4e0b\\u8f7d');
+      clickable.setAttribute('title', '\\u6279\\u91cf\\u4e0b\\u8f7d');
+      clickable.removeAttribute('data-testid');
+      clickable.removeAttribute('aria-haspopup');
+      clickable.removeAttribute('aria-expanded');
+
+      const svg = clickable.querySelector('svg');
+      if (svg) {
+        svg.setAttribute('viewBox', '0 0 24 24');
+        svg.innerHTML = '<path d="M12 3v11.59l3.3-3.3 1.4 1.42L12 17.41l-4.7-4.7 1.4-1.42 3.3 3.3V3h2zm-7 14h14v2H5v-2z"/>';
+      } else {
+        clickable.innerHTML = `<svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor"><path d="M12 3v11.59l3.3-3.3 1.4 1.42L12 17.41l-4.7-4.7 1.4-1.42 3.3 3.3V3h2zm-7 14h14v2H5v-2z"/></svg>`;
+      }
+
+      clickable.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        this.openModal();
+      });
+
+      anchor.parentElement.insertBefore(btn, anchor);
       this.ui.btn = btn;
     },
 
     openModal() {
       if (this.ui.modal) return;
 
-      const isDark = document.body.style.backgroundColor === 'rgb(0, 0, 0)' || document.body.style.backgroundColor === '#000000';
-
       const overlay = document.createElement('div');
       overlay.className = 'x-batch-overlay';
       overlay.onclick = (e) => { if (e.target === overlay) this.closeModal(); };
 
       const modal = document.createElement('div');
-      modal.className = `x-batch-modal ${isDark ? 'dark-mode' : ''}`;
+      modal.className = 'x-batch-modal';
 
       // 生成画质选项
       const qualityOptions = CONFIG.QUALITY_OPTIONS.map(o =>
@@ -1771,56 +2154,92 @@
       ).join('');
 
       modal.innerHTML = `
-        <div class="x-batch-title">批量下载 @${this.state.userName}</div>
-
-        <div class="x-batch-group">
-          <label class="x-batch-label">媒体类型</label>
-          <div class="x-batch-row">
-            <label><input type="checkbox" class="x-batch-checkbox" id="batch-type-img" ${this.config.types.image ? 'checked' : ''}>图片</label>
-            <label><input type="checkbox" class="x-batch-checkbox" id="batch-type-video" ${this.config.types.video ? 'checked' : ''}>视频</label>
-            <label><input type="checkbox" class="x-batch-checkbox" id="batch-type-gif" ${this.config.types.gif ? 'checked' : ''}>GIF</label>
+        <div class="x-batch-header">
+          <div class="x-batch-headrow">
+            <div class="x-batch-header-icon">
+              <svg viewBox="0 0 24 24"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
+            </div>
+            <div>
+              <div class="x-batch-title">原图下载器</div>
+              <div class="x-batch-subtitle">用户主页批量下载 · @${this.state.userName}</div>
+            </div>
           </div>
         </div>
-
-        <div class="x-batch-group">
-          <label class="x-batch-label">图片画质</label>
-          <select class="x-batch-input" id="batch-quality">
-            ${qualityOptions}
-          </select>
-        </div>
-
-        <div class="x-batch-group">
-          <label class="x-batch-label">时间范围 (可选)</label>
-          <div class="x-batch-row">
-            <input type="date" class="x-batch-input" id="batch-date-start" placeholder="开始" value="${this.config.dateRange.start}">
-            <span>-</span>
-            <input type="date" class="x-batch-input" id="batch-date-end" placeholder="结束" value="${this.config.dateRange.end}">
+        <div class="x-batch-body">
+          <div class="x-batch-group">
+            <label class="x-batch-label">媒体类型</label>
+            <div class="x-batch-card">
+              <div class="x-batch-row">
+                <label><input type="checkbox" class="x-batch-checkbox" id="batch-type-img" ${this.config.types.image ? 'checked' : ''}>图片</label>
+                <label><input type="checkbox" class="x-batch-checkbox" id="batch-type-video" ${this.config.types.video ? 'checked' : ''}>视频</label>
+                <label><input type="checkbox" class="x-batch-checkbox" id="batch-type-gif" ${this.config.types.gif ? 'checked' : ''}>GIF</label>
+              </div>
+            </div>
           </div>
-        </div>
 
-        <div class="x-batch-group">
-          <label class="x-batch-label">保存路径 (相对下载目录)</label>
-          <input type="text" class="x-batch-input" id="batch-path" value="${this.config.pathTemplate}">
-        </div>
+          <div class="x-batch-group">
+            <label class="x-batch-label">图片质量</label>
+            <div class="x-batch-card">
+              <div class="x-batch-row">
+                <input type="hidden" id="batch-quality" value="${this.config.quality}">
+                <div class="x-batch-select-wrap" id="batch-quality-wrap">
+                  <button type="button" class="x-batch-select-trigger" id="batch-quality-trigger" aria-haspopup="listbox" aria-expanded="false">
+                    <span id="batch-quality-label">${CONFIG.QUALITY_OPTIONS.find(o => o.name === this.config.quality)?.label || this.config.quality}</span>
+                    <svg class="x-batch-select-caret" viewBox="0 0 24 24" fill="currentColor"><path d="M7 10l5 5 5-5z"/></svg>
+                  </button>
+                  <div class="x-batch-select-menu" id="batch-quality-menu" role="listbox">
+                    ${CONFIG.QUALITY_OPTIONS.map(o => `<button type="button" class="x-batch-select-item ${o.name === this.config.quality ? 'active' : ''}" data-value="${o.name}">${o.label}</button>`).join('')}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
 
-        <div class="x-batch-group">
-          <label class="x-batch-label">文件名规则</label>
-          <input type="text" class="x-batch-input" id="batch-name" value="${this.config.nameTemplate}">
-          <div style="font-size:12px;color:#888;margin-top:4px">支持变量: {date}, {time}, {id}, {user}</div>
-        </div>
+          <div class="x-batch-group">
+            <label class="x-batch-label">时间范围（可选）</label>
+            <div class="x-batch-card">
+              <div class="x-batch-row x-batch-inline">
+                <input type="date" class="x-batch-input" id="batch-date-start" value="${this.config.dateRange.start}">
+                <input type="date" class="x-batch-input" id="batch-date-end" value="${this.config.dateRange.end}">
+              </div>
+            </div>
+          </div>
 
-        <div id="batch-status" style="margin-top:16px;display:none;padding:10px;background:rgba(29,155,240,0.1);border-radius:8px;">
-          <div id="batch-status-text">正在扫描...</div>
-        </div>
+          <div class="x-batch-group">
+            <label class="x-batch-label">保存路径（相对下载目录）</label>
+            <div class="x-batch-card">
+              <div class="x-batch-row">
+                <input type="text" class="x-batch-input" id="batch-path" value="${this.config.pathTemplate}">
+              </div>
+            </div>
+          </div>
 
-        <div class="x-batch-actions">
-          <button class="x-batch-btn-secondary" id="batch-cancel">关闭</button>
-          <button class="x-batch-btn-primary" id="batch-start">开始下载</button>
+          <div class="x-batch-group">
+            <label class="x-batch-label">文件名规则</label>
+            <div class="x-batch-card">
+              <div class="x-batch-row">
+                <input type="text" class="x-batch-input" id="batch-name" value="${this.config.nameTemplate}">
+              </div>
+            </div>
+            <div class="x-batch-help">支持变量: {date}, {time}, {id}, {user}</div>
+          </div>
+
+          <div id="batch-status" class="x-batch-status">
+            <div id="batch-status-text">正在扫描...</div>
+          </div>
+
+          <div class="x-batch-actions">
+            <button class="x-batch-btn-secondary" id="batch-cancel">关闭</button>
+            <button class="x-batch-btn-primary" id="batch-start">开始下载</button>
+          </div>
         </div>
       `;
 
       document.body.appendChild(overlay);
       document.body.appendChild(modal);
+      requestAnimationFrame(() => modal.classList.add('x-batch-visible'));
+      this.state.prevBodyOverflow = document.body.style.overflow;
+      document.body.style.overflow = 'hidden';
 
       this.ui.overlay = overlay;
       this.ui.modal = modal;
@@ -1828,6 +2247,49 @@
       // Bind events
       modal.querySelector('#batch-cancel').onclick = () => this.closeModal();
       modal.querySelector('#batch-start').onclick = () => this.toggleScan();
+      this.setupQualitySelect(modal);
+    },
+
+    setupQualitySelect(modal) {
+      const wrap = modal.querySelector('#batch-quality-wrap');
+      const trigger = modal.querySelector('#batch-quality-trigger');
+      const menu = modal.querySelector('#batch-quality-menu');
+      const hidden = modal.querySelector('#batch-quality');
+      const label = modal.querySelector('#batch-quality-label');
+      if (!wrap || !trigger || !menu || !hidden || !label) return;
+
+      const open = () => {
+        wrap.classList.add('open');
+        trigger.setAttribute('aria-expanded', 'true');
+      };
+      const close = () => {
+        wrap.classList.remove('open');
+        trigger.setAttribute('aria-expanded', 'false');
+      };
+
+      trigger.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        if (wrap.classList.contains('open')) close();
+        else open();
+      });
+
+      menu.querySelectorAll('.x-batch-select-item').forEach((item) => {
+        item.addEventListener('click', (e) => {
+          e.preventDefault();
+          const value = item.getAttribute('data-value');
+          hidden.value = value;
+          label.textContent = item.textContent || value;
+          menu.querySelectorAll('.x-batch-select-item').forEach((node) => node.classList.remove('active'));
+          item.classList.add('active');
+          close();
+        });
+      });
+
+      this.ui.qualityOutsideHandler = (ev) => {
+        if (!wrap.contains(ev.target)) close();
+      };
+      document.addEventListener('click', this.ui.qualityOutsideHandler, true);
     },
 
     closeModal() {
@@ -1839,6 +2301,12 @@
       this.ui.overlay?.remove();
       this.ui.modal = null;
       this.ui.overlay = null;
+      document.body.style.overflow = this.state.prevBodyOverflow || '';
+      this.state.prevBodyOverflow = '';
+      if (this.ui.qualityOutsideHandler) {
+        document.removeEventListener('click', this.ui.qualityOutsideHandler, true);
+        this.ui.qualityOutsideHandler = null;
+      }
     },
 
     async toggleScan() {
@@ -2061,3 +2529,4 @@
     init();
   }
 })();
+
