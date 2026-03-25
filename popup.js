@@ -15,11 +15,136 @@ document.addEventListener('DOMContentLoaded', function () {
   const batchVideo = document.getElementById('batchVideo');
   const batchGif = document.getElementById('batchGif');
   const batchQuality = document.getElementById('batchQuality');
+  const batchDateStart = document.getElementById('batchDateStart');
+  const batchDateEnd = document.getElementById('batchDateEnd');
+  const batchPathTemplate = document.getElementById('batchPathTemplate');
+  const batchNameTemplate = document.getElementById('batchNameTemplate');
+  const batchTemplatePreview = document.getElementById('batchTemplatePreview');
   const batchDownloadBtn = document.getElementById('batchDownloadBtn');
   const saveBtn = document.getElementById('saveBtn');
   const resetBtn = document.getElementById('resetBtn');
   const statusMessage = document.getElementById('statusMessage');
   const statusText = document.getElementById('statusText');
+  const downloadStatusResolving = document.getElementById('downloadStatusResolving');
+  const downloadStatusDownloading = document.getElementById('downloadStatusDownloading');
+  const downloadStatusCompleted = document.getElementById('downloadStatusCompleted');
+  const downloadStatusFailed = document.getElementById('downloadStatusFailed');
+  const downloadStatusTotal = document.getElementById('downloadStatusTotal');
+  const downloadStatusUpdated = document.getElementById('downloadStatusUpdated');
+  const downloadStatusList = document.getElementById('downloadStatusList');
+
+  function getDefaultBatchSettings() {
+    return {
+      types: { image: true, video: true, gif: true },
+      quality: '4096x4096',
+      dateRange: { start: '', end: '' },
+      pathTemplate: 'X_Downloads/{user}',
+      nameTemplate: '{date}_{id}'
+    };
+  }
+
+  function sanitizeTemplateValue(value, fallbackValue) {
+    const normalized = typeof value === 'string' ? value.trim() : '';
+    return normalized || fallbackValue;
+  }
+
+  function normalizeBatchSettings(rawSettings, fallbackQuality = '4096x4096') {
+    const defaults = getDefaultBatchSettings();
+    const raw = rawSettings || {};
+
+    return {
+      types: {
+        image: raw.types?.image !== false,
+        video: raw.types?.video !== false,
+        gif: raw.types?.gif !== false
+      },
+      quality: sanitizeTemplateValue(raw.quality, fallbackQuality || defaults.quality),
+      dateRange: {
+        start: typeof raw.dateRange?.start === 'string' ? raw.dateRange.start : defaults.dateRange.start,
+        end: typeof raw.dateRange?.end === 'string' ? raw.dateRange.end : defaults.dateRange.end
+      },
+      pathTemplate: sanitizeTemplateValue(raw.pathTemplate, defaults.pathTemplate),
+      nameTemplate: sanitizeTemplateValue(raw.nameTemplate, defaults.nameTemplate)
+    };
+  }
+
+  function validateBatchSettings(batchSettings) {
+    if (!batchSettings.types.image && !batchSettings.types.video && !batchSettings.types.gif) {
+      return '请至少选择一种媒体类型';
+    }
+
+    if (batchSettings.dateRange.start && batchSettings.dateRange.end && new Date(batchSettings.dateRange.start) > new Date(batchSettings.dateRange.end)) {
+      return '开始日期不能晚于结束日期';
+    }
+
+    return null;
+  }
+
+  function renderBatchTemplatePreview(batchSettings) {
+    const tokens = {
+      date: '20260325',
+      time: '123456',
+      id: '1234567890',
+      user: 'user'
+    };
+
+    const path = batchSettings.pathTemplate.replace(/\{(date|time|id|user)\}/g, (_, token) => tokens[token] || 'unknown');
+    const name = batchSettings.nameTemplate.replace(/\{(date|time|id|user)\}/g, (_, token) => tokens[token] || 'unknown');
+    batchTemplatePreview.textContent = `${path}/${name}.png`;
+  }
+
+  function getCurrentBatchSettings() {
+    return normalizeBatchSettings({
+      types: {
+        image: batchImage.checked,
+        video: batchVideo.checked,
+        gif: batchGif.checked
+      },
+      quality: batchQuality.value,
+      dateRange: {
+        start: batchDateStart.value,
+        end: batchDateEnd.value
+      },
+      pathTemplate: batchPathTemplate.value,
+      nameTemplate: batchNameTemplate.value
+    }, imageQuality.value);
+  }
+
+  function applyBatchSettings(batchSettings) {
+    batchImage.checked = batchSettings.types.image;
+    batchVideo.checked = batchSettings.types.video;
+    batchGif.checked = batchSettings.types.gif;
+    batchQuality.value = batchSettings.quality;
+    batchDateStart.value = batchSettings.dateRange.start;
+    batchDateEnd.value = batchSettings.dateRange.end;
+    batchPathTemplate.value = batchSettings.pathTemplate;
+    batchNameTemplate.value = batchSettings.nameTemplate;
+    renderBatchTemplatePreview(batchSettings);
+  }
+
+  function persistBatchSettings(batchSettings, callback) {
+    chrome.storage.sync.set({ batchSettings }, () => callback?.());
+  }
+
+  function saveBatchSettings(showSavedStatus = false) {
+    const batchSettings = getCurrentBatchSettings();
+    const validationError = validateBatchSettings(batchSettings);
+    if (validationError) {
+      showStatus(validationError, 'error');
+      return null;
+    }
+
+    applyBatchSettings(batchSettings);
+    persistBatchSettings(batchSettings, () => {
+      if (showSavedStatus) {
+        showStatus('批量下载设置已保存', 'success');
+      }
+    });
+    return batchSettings;
+  }
+
+  const batchSettingInputs = [batchImage, batchVideo, batchGif, batchQuality, batchDateStart, batchDateEnd, batchPathTemplate, batchNameTemplate];
+  let statusRefreshTimer = null;
 
   // 默认设置
   const defaultSettings = {
@@ -30,8 +155,112 @@ document.addEventListener('DOMContentLoaded', function () {
     previewTriggerKey: 'shift',
     previewDelay: 300,
     previewFollowMouse: true,
-    imageQuality: '4096x4096'
+    imageQuality: '4096x4096',
+    batchSettings: getDefaultBatchSettings()
   };
+
+  batchSettingInputs.forEach((input) => {
+    input.addEventListener('input', () => {
+      renderBatchTemplatePreview(getCurrentBatchSettings());
+    });
+    input.addEventListener('change', () => {
+      renderBatchTemplatePreview(getCurrentBatchSettings());
+    });
+  });
+
+  function formatRelativeTime(timestamp) {
+    if (!timestamp) return '暂无下载记录';
+    const diffMs = Date.now() - timestamp;
+    if (diffMs < 60 * 1000) return '刚刚更新';
+    const diffMinutes = Math.floor(diffMs / (60 * 1000));
+    if (diffMinutes < 60) return `${diffMinutes} 分钟前更新`;
+    const diffHours = Math.floor(diffMinutes / 60);
+    if (diffHours < 24) return `${diffHours} 小时前更新`;
+    const diffDays = Math.floor(diffHours / 24);
+    return `${diffDays} 天前更新`;
+  }
+
+  function getStatusLabel(status) {
+    if (status === 'resolving') return '解析中';
+    if (status === 'downloading') return '下载中';
+    if (status === 'completed') return '已完成';
+    if (status === 'failed') return '失败';
+    return '未知';
+  }
+
+  function getTypeLabel(type) {
+    if (type === 'image') return '图片';
+    if (type === 'video') return '视频';
+    if (type === 'gif') return 'GIF';
+    return '文件';
+  }
+
+  function escapeHtml(value) {
+    return String(value || '').replace(/[&<>"']/g, (char) => ({
+      '&': '&amp;',
+      '<': '&lt;',
+      '>': '&gt;',
+      '"': '&quot;',
+      "'": '&#39;'
+    }[char]));
+  }
+
+  function renderDownloadStatusCenter(center) {
+    const summary = center?.summary || {};
+    const items = Array.isArray(center?.items) ? center.items : [];
+
+    downloadStatusResolving.textContent = summary.resolving || 0;
+    downloadStatusDownloading.textContent = summary.downloading || 0;
+    downloadStatusCompleted.textContent = summary.completed || 0;
+    downloadStatusFailed.textContent = summary.failed || 0;
+    downloadStatusTotal.textContent = summary.total || 0;
+    downloadStatusUpdated.textContent = formatRelativeTime(center?.updatedAt || 0);
+
+    if (!items.length) {
+      downloadStatusList.innerHTML = '<div class="download-status-empty">暂无下载记录</div>';
+      return;
+    }
+
+    downloadStatusList.innerHTML = items.slice(0, 6).map((item) => {
+      const status = item.status || 'downloading';
+      const sourceText = item.source === 'batch'
+        ? '批量下载'
+        : item.source === 'quick-batch'
+          ? 'Popup 批量'
+          : '单项下载';
+      const metaParts = [getTypeLabel(item.type), sourceText];
+      if (item.folder) metaParts.push(item.folder);
+
+      return `
+        <div class="download-status-item">
+          <div class="download-status-item-head">
+            <div class="download-status-name">${escapeHtml(item.fileName || 'unknown')}</div>
+            <div class="download-status-badge ${escapeHtml(status)}">${escapeHtml(getStatusLabel(status))}</div>
+          </div>
+          <div class="download-status-meta">${escapeHtml(metaParts.join(' · '))}</div>
+          <div class="download-status-message">${escapeHtml(item.message || '等待更新')}</div>
+        </div>
+      `;
+    }).join('');
+  }
+
+  function refreshDownloadStatusCenter() {
+    chrome.runtime.sendMessage({ action: 'getDownloadStatusCenter' }, (response) => {
+      if (chrome.runtime.lastError || !response?.success) {
+        downloadStatusUpdated.textContent = '暂时无法读取下载状态';
+        return;
+      }
+      renderDownloadStatusCenter(response.center);
+    });
+  }
+
+  function startStatusRefreshLoop() {
+    refreshDownloadStatusCenter();
+    if (statusRefreshTimer) {
+      clearInterval(statusRefreshTimer);
+    }
+    statusRefreshTimer = setInterval(refreshDownloadStatusCenter, 2000);
+  }
 
   // 加载设置
   function loadSettings() {
@@ -44,6 +273,7 @@ document.addEventListener('DOMContentLoaded', function () {
       previewDelay.value = items.previewDelay;
       previewDelayValue.textContent = items.previewDelay + 'ms';
       imageQuality.value = items.imageQuality;
+      applyBatchSettings(normalizeBatchSettings(items.batchSettings, items.imageQuality));
 
       // 根据触发模式显示/隐藏按键选择
       triggerKeyItem.style.display = items.previewTriggerMode === 'key' ? 'flex' : 'none';
@@ -66,6 +296,13 @@ document.addEventListener('DOMContentLoaded', function () {
 
   // 保存设置
   function saveSettings() {
+    const batchSettings = getCurrentBatchSettings();
+    const validationError = validateBatchSettings(batchSettings);
+    if (validationError) {
+      showStatus(validationError, 'error');
+      return;
+    }
+
     const settings = {
       enablePreview: enablePreview.checked,
       enableImagePreview: enableImagePreview.checked,
@@ -74,10 +311,13 @@ document.addEventListener('DOMContentLoaded', function () {
       previewTriggerKey: previewTriggerKey.value,
       previewDelay: parseInt(previewDelay.value),
       previewFollowMouse: true, // 始终强制为true
-      imageQuality: imageQuality.value
+      imageQuality: imageQuality.value,
+      batchSettings: batchSettings
     };
 
     chrome.storage.sync.set(settings, () => {
+      applyBatchSettings(batchSettings);
+
       // 通知content script设置已更新
       notifyContentScript(settings);
 
@@ -102,6 +342,9 @@ document.addEventListener('DOMContentLoaded', function () {
 
   // 执行批量下载
   function executeBatchDownload() {
+    const batchSettings = saveBatchSettings();
+    if (!batchSettings) return;
+
     // 检查是否在X/Twitter页面
     chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
       const currentTab = tabs[0];
@@ -110,25 +353,10 @@ document.addEventListener('DOMContentLoaded', function () {
         return;
       }
 
-      // 收集批量下载选项
-      const mediaTypes = [];
-      if (batchImage.checked) mediaTypes.push('image');
-      if (batchVideo.checked) mediaTypes.push('video');
-      if (batchGif.checked) mediaTypes.push('gif');
-
-      if (mediaTypes.length === 0) {
-        showStatus('请至少选择一种媒体类型', 'error');
-        return;
-      }
-
       // 发送批量下载请求到content script
       chrome.tabs.sendMessage(currentTab.id, {
         action: 'batchDownload',
-        filters: {
-          mediaTypes: mediaTypes,
-          quality: batchQuality.value,
-          dateRange: null
-        }
+        filters: batchSettings
       }, (response) => {
         if (chrome.runtime.lastError) {
           showStatus('请刷新页面后重试', 'error');
@@ -147,6 +375,8 @@ document.addEventListener('DOMContentLoaded', function () {
       notifyContentScript(defaultSettings);
     });
   }
+
+  renderBatchTemplatePreview(getDefaultBatchSettings());
 
   // 显示状态消息
   function showStatus(message, type) {
@@ -173,6 +403,18 @@ document.addEventListener('DOMContentLoaded', function () {
   // 重置按钮点击事件
   resetBtn.addEventListener('click', resetSettings);
 
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) return;
+    refreshDownloadStatusCenter();
+  });
+
+  window.addEventListener('beforeunload', () => {
+    if (statusRefreshTimer) {
+      clearInterval(statusRefreshTimer);
+    }
+  });
+
   // 加载设置
   loadSettings();
+  startStatusRefreshLoop();
 });

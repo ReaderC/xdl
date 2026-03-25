@@ -3,6 +3,8 @@
 
 const videoCache = new Map();
 const DEBUG = true;
+const DOWNLOAD_STATUS_KEY = 'downloadStatusCenter';
+const MAX_DOWNLOAD_STATUS_ITEMS = 30;
 
 function log(...args) {
   if (DEBUG) {
@@ -14,67 +16,323 @@ function logError(...args) {
   console.error('[X下载器]', new Date().toISOString(), ...args);
 }
 
+function storageLocalGet(key) {
+  return new Promise((resolve) => {
+    chrome.storage.local.get(key, resolve);
+  });
+}
+
+function storageLocalSet(value) {
+  return new Promise((resolve) => {
+    chrome.storage.local.set(value, resolve);
+  });
+}
+
+function createEmptyDownloadStatusCenter() {
+  return {
+    items: [],
+    summary: {
+      resolving: 0,
+      downloading: 0,
+      completed: 0,
+      failed: 0,
+      total: 0
+    },
+    updatedAt: 0
+  };
+}
+
+function summarizeDownloadStatuses(items) {
+  const summary = {
+    resolving: 0,
+    downloading: 0,
+    completed: 0,
+    failed: 0,
+    total: items.length
+  };
+
+  items.forEach((item) => {
+    if (summary[item.status] !== undefined) {
+      summary[item.status] += 1;
+    }
+  });
+
+  return summary;
+}
+
+function normalizeDownloadStatusCenter(rawCenter) {
+  const items = Array.isArray(rawCenter?.items)
+    ? rawCenter.items
+      .filter(Boolean)
+      .map((item) => ({
+        id: item.id,
+        status: item.status || 'downloading',
+        type: item.type || 'file',
+        fileName: item.fileName || 'unknown',
+        folder: item.folder || '',
+        targetPath: item.targetPath || item.fileName || 'unknown',
+        message: item.message || '',
+        error: item.error || '',
+        downloadId: typeof item.downloadId === 'number' ? item.downloadId : null,
+        createdAt: Number(item.createdAt) || Date.now(),
+        updatedAt: Number(item.updatedAt) || Number(item.createdAt) || Date.now(),
+        completedAt: Number(item.completedAt) || null,
+        source: item.source || 'manual'
+      }))
+      .sort((a, b) => b.updatedAt - a.updatedAt)
+      .slice(0, MAX_DOWNLOAD_STATUS_ITEMS)
+    : [];
+
+  return {
+    items,
+    summary: summarizeDownloadStatuses(items),
+    updatedAt: Number(rawCenter?.updatedAt) || (items[0]?.updatedAt || 0)
+  };
+}
+
+async function getDownloadStatusCenter() {
+  const result = await storageLocalGet(DOWNLOAD_STATUS_KEY);
+  return normalizeDownloadStatusCenter(result[DOWNLOAD_STATUS_KEY]);
+}
+
+async function saveDownloadStatusCenter(center) {
+  const normalized = normalizeDownloadStatusCenter(center);
+  await storageLocalSet({ [DOWNLOAD_STATUS_KEY]: normalized });
+  return normalized;
+}
+
+function createDownloadStatusId() {
+  return `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function buildTargetPath(folder, fileName, fallbackFolder = '') {
+  const resolvedFolder = folder || fallbackFolder;
+  return resolvedFolder ? `${resolvedFolder}/${fileName}` : fileName;
+}
+
+function getSafeFolder(folder, fallbackFolder) {
+  return folder || fallbackFolder;
+}
+
+function getSafeFileName(fileName, fallbackFileName) {
+  return (typeof fileName === 'string' && fileName.trim()) ? fileName : fallbackFileName;
+}
+
+async function upsertDownloadStatus(patch) {
+  const center = await getDownloadStatusCenter();
+  const items = [...center.items];
+  const index = items.findIndex((item) => item.id === patch.id);
+  const previous = index >= 0 ? items[index] : null;
+  const now = Date.now();
+
+  const nextItem = {
+    ...previous,
+    ...patch,
+    createdAt: previous?.createdAt || patch.createdAt || now,
+    updatedAt: now
+  };
+
+  if ((nextItem.status === 'completed' || nextItem.status === 'failed') && !nextItem.completedAt) {
+    nextItem.completedAt = now;
+  }
+
+  if (index >= 0) {
+    items[index] = nextItem;
+  } else {
+    items.unshift(nextItem);
+  }
+
+  return saveDownloadStatusCenter({
+    items,
+    updatedAt: now
+  });
+}
+
+async function updateDownloadStatusByDownloadId(downloadId, patch) {
+  const center = await getDownloadStatusCenter();
+  const item = center.items.find((entry) => entry.downloadId === downloadId);
+  if (!item) return null;
+
+  return upsertDownloadStatus({
+    ...item,
+    ...patch,
+    id: item.id
+  });
+}
+
+async function beginTrackedDownload({ type, fileName, folder, source, status, message }) {
+  const entryId = createDownloadStatusId();
+  await upsertDownloadStatus({
+    id: entryId,
+    type,
+    fileName,
+    folder,
+    targetPath: buildTargetPath(folder, fileName),
+    source: source || 'manual',
+    status,
+    message
+  });
+  return entryId;
+}
+
+async function markTrackedDownloadQueued(entryId, downloadId, { type, fileName, folder, source, message }) {
+  await upsertDownloadStatus({
+    id: entryId,
+    type,
+    fileName,
+    folder,
+    targetPath: buildTargetPath(folder, fileName),
+    source: source || 'manual',
+    downloadId,
+    status: 'downloading',
+    message: message || '已加入浏览器下载队列'
+  });
+}
+
+async function markTrackedDownloadFailed(entryId, error, { type, fileName, folder, source }) {
+  const message = error?.message || '下载失败';
+  await upsertDownloadStatus({
+    id: entryId,
+    type,
+    fileName,
+    folder,
+    targetPath: buildTargetPath(folder, fileName),
+    source: source || 'manual',
+    status: 'failed',
+    message,
+    error: message
+  });
+}
+
+async function clearStaleResolvingDownloads() {
+  const center = await getDownloadStatusCenter();
+  const staleThreshold = Date.now() - 1000 * 60 * 60 * 12;
+  const staleItems = center.items.filter((item) => item.status === 'resolving' && item.updatedAt < staleThreshold);
+
+  await Promise.all(staleItems.map((item) => upsertDownloadStatus({
+    id: item.id,
+    status: 'failed',
+    message: '后台已重启，请重新发起下载',
+    error: 'service_worker_restarted'
+  })));
+}
+
+async function ensureDownloadStatusCenter() {
+  const center = await getDownloadStatusCenter();
+  if (!center.updatedAt) {
+    await saveDownloadStatusCenter(center);
+  }
+}
+
+ensureDownloadStatusCenter();
+clearStaleResolvingDownloads();
+
 /**
  * 监听消息
  */
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   log('收到消息:', message.action);
-  
+
   if (message.action === 'downloadImage') {
-    downloadImage(message.url, message.filename, message.folder)
+    downloadImage(message)
       .then(() => sendResponse({ success: true }))
       .catch((error) => sendResponse({ success: false, error: error.message }));
     return true;
   }
-  
+
   if (message.action === 'downloadVideo') {
     handleVideoDownload(message)
       .then((result) => sendResponse(result))
       .catch((error) => sendResponse({ success: false, error: error.message }));
     return true;
   }
-  
+
+  if (message.action === 'getDownloadStatusCenter') {
+    getDownloadStatusCenter()
+      .then((center) => sendResponse({ success: true, center }))
+      .catch((error) => sendResponse({ success: false, error: error.message }));
+    return true;
+  }
+
   return false;
 });
 
 /**
  * 下载图片
  */
-async function downloadImage(url, filename, folder) {
-  const saveFolder = folder || 'X_Original_Images';
-  const downloadId = await chrome.downloads.download({
-    url: url,
-    filename: `${saveFolder}/${filename}`,
-    saveAs: false
+async function downloadImage({ url, filename, folder, source }) {
+  const saveFolder = getSafeFolder(folder, 'X_Original_Images');
+  const finalFilename = getSafeFileName(filename, 'image.jpg');
+  const entryId = await beginTrackedDownload({
+    type: 'image',
+    fileName: finalFilename,
+    folder: saveFolder,
+    source,
+    status: 'downloading',
+    message: '正在加入下载队列'
   });
-  log('图片下载已开始，ID:', downloadId);
-  return downloadId;
+
+  try {
+    const downloadId = await chrome.downloads.download({
+      url,
+      filename: `${saveFolder}/${finalFilename}`,
+      saveAs: false
+    });
+
+    await markTrackedDownloadQueued(entryId, downloadId, {
+      type: 'image',
+      fileName: finalFilename,
+      folder: saveFolder,
+      source
+    });
+
+    log('图片下载已开始，ID:', downloadId);
+    return downloadId;
+  } catch (error) {
+    await markTrackedDownloadFailed(entryId, error, {
+      type: 'image',
+      fileName: finalFilename,
+      folder: saveFolder,
+      source
+    });
+    throw error;
+  }
 }
 
 /**
  * 处理视频下载 - 使用多种方法尝试
  */
-async function handleVideoDownload({ tweetId, directVideoUrl, pageUrl, isGif, folder }) {
+async function handleVideoDownload({ tweetId, directVideoUrl, pageUrl, isGif, filename, folder, source }) {
   log('========== 开始视频下载 ==========');
-  log('参数:', { tweetId, directVideoUrl, pageUrl, isGif, folder });
+  log('参数:', { tweetId, directVideoUrl, pageUrl, isGif, filename, folder, source });
+
+  const type = isGif ? 'gif' : 'video';
+  const saveFolder = getSafeFolder(folder, 'X_Videos');
+  const finalFilename = getSafeFileName(filename, tweetId ? (isGif ? `gif_${tweetId}.mp4` : `tweet_${tweetId}.mp4`) : (isGif ? 'gif.mp4' : 'video.mp4'));
+  const entryId = await beginTrackedDownload({
+    type,
+    fileName: finalFilename,
+    folder: saveFolder,
+    source,
+    status: 'resolving',
+    message: isGif ? '正在解析 GIF 下载链接' : '正在解析视频下载链接'
+  });
 
   try {
     let videoUrl = null;
-    let filename = isGif ? 'gif.mp4' : 'video.mp4';
-    const saveFolder = folder || 'X_Videos';
-    
+
     // 检查缓存
     if (tweetId && videoCache.has(tweetId)) {
       videoUrl = videoCache.get(tweetId);
       log('使用缓存URL');
     }
-    
+
     // 方案1: 直接视频URL
     if (!videoUrl && directVideoUrl && !directVideoUrl.includes('.m3u8')) {
       videoUrl = directVideoUrl;
       log('使用直接URL');
     }
-    
+
     // 方案2: 使用Syndication API（不需要认证，最可靠）
     if (!videoUrl && tweetId) {
       log('尝试Syndication API...');
@@ -102,7 +360,7 @@ async function handleVideoDownload({ tweetId, directVideoUrl, pageUrl, isGif, fo
         logError('FixTweet API失败:', e.message);
       }
     }
-    
+
     // 方案3: 使用GraphQL API（需要登录）
     if (!videoUrl && tweetId) {
       log('尝试GraphQL API...');
@@ -116,7 +374,7 @@ async function handleVideoDownload({ tweetId, directVideoUrl, pageUrl, isGif, fo
         logError('GraphQL API失败:', e.message);
       }
     }
-    
+
     // 方案4: 解析m3u8
     if (!videoUrl && directVideoUrl && directVideoUrl.includes('.m3u8')) {
       log('尝试解析m3u8...');
@@ -127,30 +385,42 @@ async function handleVideoDownload({ tweetId, directVideoUrl, pageUrl, isGif, fo
         logError('m3u8解析失败:', e.message);
       }
     }
-    
+
     if (!videoUrl) {
       throw new Error('无法获取视频链接，请确保推文存在且包含视频');
     }
-    
+
     // 缓存结果
     if (tweetId) {
       videoCache.set(tweetId, videoUrl);
     }
-    
-    filename = tweetId ? (isGif ? `gif_${tweetId}.mp4` : `tweet_${tweetId}.mp4`) : filename;
-    
-    // 下载
+
     const downloadId = await chrome.downloads.download({
       url: videoUrl,
-      filename: `${saveFolder}/${filename}`,
+      filename: `${saveFolder}/${finalFilename}`,
       saveAs: false
     });
-    
+
+    await markTrackedDownloadQueued(entryId, downloadId, {
+      type,
+      fileName: finalFilename,
+      folder: saveFolder,
+      source,
+      message: '已加入浏览器下载队列'
+    });
+
     log('视频下载已开始，ID:', downloadId);
     log('========== 下载成功 ==========');
-    
-    return { success: true };
+
+    return { success: true, downloadId };
   } catch (error) {
+    await markTrackedDownloadFailed(entryId, error, {
+      type,
+      fileName: finalFilename,
+      folder: saveFolder,
+      source
+    });
+
     logError('视频下载失败:', error);
     log('========== 下载失败 ==========');
     return { success: false, error: error.message };
@@ -163,10 +433,8 @@ async function handleVideoDownload({ tweetId, directVideoUrl, pageUrl, isGif, fo
  */
 async function fetchViaSyndicationAPI(tweetId) {
   log('Syndication API请求，ID:', tweetId);
-  
-  // 构建请求URL
+
   const url = `https://syndication.twitter.com/tweet-result?id=${tweetId}&token=0`;
-  
   const response = await fetch(url, {
     method: 'GET',
     headers: {
@@ -175,22 +443,19 @@ async function fetchViaSyndicationAPI(tweetId) {
       'Origin': 'https://platform.twitter.com'
     }
   });
-  
+
   log('Syndication响应状态:', response.status);
-  
+
   if (!response.ok) {
     throw new Error(`Syndication API失败: ${response.status}`);
   }
-  
+
   const text = await response.text();
-  
-  // 解析JSONP响应
   let data;
+
   try {
-    // 尝试直接解析JSON
     data = JSON.parse(text);
   } catch (e) {
-    // 可能是JSONP格式，提取JSON部分
     const match = text.match(/^[a-zA-Z0-9_]+\((.*)\)$/s);
     if (match) {
       data = JSON.parse(match[1]);
@@ -198,29 +463,24 @@ async function fetchViaSyndicationAPI(tweetId) {
       throw new Error('无法解析响应');
     }
   }
-  
+
   log('Syndication数据结构:', Object.keys(data));
-  
-  // 提取视频信息
-  const media = data?.mediaDetails?.[0] || 
-                data?.entities?.media?.[0] ||
-                data?.extended_entities?.media?.[0];
-  
+
+  const media = data?.mediaDetails?.[0] || data?.entities?.media?.[0] || data?.extended_entities?.media?.[0];
   if (!media) {
     log('数据:', JSON.stringify(data).substring(0, 500));
     throw new Error('未找到媒体信息');
   }
-  
+
   const videoInfo = media.video_info;
   if (!videoInfo || !videoInfo.variants) {
     throw new Error('未找到视频信息');
   }
-  
-  // 找最高画质
+
   const variants = videoInfo.variants;
   let bestVideo = null;
   let highestBitrate = 0;
-  
+
   for (const variant of variants) {
     if (variant.type === 'video/mp4' || (variant.src && variant.src.includes('.mp4'))) {
       const bitrate = variant.bitrate || 0;
@@ -230,36 +490,29 @@ async function fetchViaSyndicationAPI(tweetId) {
       }
     }
   }
-  
+
   if (!bestVideo) {
-    bestVideo = variants.find(v => v.type === 'video/mp4' || v.src?.includes('.mp4'));
+    bestVideo = variants.find((v) => v.type === 'video/mp4' || v.src?.includes('.mp4'));
   }
-  
+
   if (!bestVideo || (!bestVideo.src && !bestVideo.url)) {
     throw new Error('未找到MP4视频');
   }
-  
+
   const videoUrl = bestVideo.src || bestVideo.url;
   log('Syndication获取视频URL:', videoUrl);
-  
   return { url: videoUrl, bitrate: highestBitrate };
 }
 
 /**
  * 方案2.5: FixTweet API（公开API，不需要认证，最稳定）
- * 参考: https://docs.fxtwitter.com/
- * 2026年更新：改进API调用格式和错误处理
  */
 async function fetchViaFixTweetAPI(tweetId) {
   log('FixTweet API请求，ID:', tweetId);
 
-  // 尝试多种URL格式
   const urlFormats = [
-    // 格式1: 使用screen_name
     `https://api.fxtwitter.com/i/status/${tweetId}`,
-    // 格式2: 旧格式备用
     `https://api.fxtwitter.com/status/status/${tweetId}`,
-    // 格式3: 直接使用tweet ID
     `https://api.fxtwitter.com/tweet/${tweetId}`
   ];
 
@@ -279,18 +532,12 @@ async function fetchViaFixTweetAPI(tweetId) {
       });
 
       log('FixTweet响应状态:', response.status);
-
-      if (!response.ok) {
-        continue; // 尝试下一个URL
-      }
+      if (!response.ok) continue;
 
       const data = await response.json();
-
-      // 提取视频信息 - 尝试多种数据路径
       let tweet = data?.tweet || data?.data?.tweet;
 
       if (!tweet) {
-        // 可能返回的是threaded_conversation结构
         const instructions = data?.data?.threaded_conversation_with_injections?.instructions;
         if (instructions) {
           for (const instruction of instructions) {
@@ -302,59 +549,44 @@ async function fetchViaFixTweetAPI(tweetId) {
                 }
               }
             }
+            if (tweet) break;
           }
         }
       }
 
-      if (!tweet) {
-        continue; // 尝试下一个URL
-      }
+      if (!tweet) continue;
 
-      // 提取媒体信息
       const media = tweet?.media || tweet?.legacy?.extended_entities?.media;
-      if (!media) {
-        continue; // 尝试下一个URL
-      }
+      if (!media) continue;
 
-      // 获取视频列表
       let videos = [];
-
       if (Array.isArray(media)) {
-        // 媒体是数组格式
-        for (const m of media) {
-          if (m.video_info?.variants) {
-            videos = m.video_info.variants;
+        for (const item of media) {
+          if (item.video_info?.variants) {
+            videos = item.video_info.variants;
             break;
           }
-          if (m.videos) {
-            videos = m.videos;
+          if (item.videos) {
+            videos = item.videos;
             break;
           }
         }
       } else if (media.videos) {
-        // 媒体是对象格式，包含videos数组
         videos = media.videos;
       } else if (media.video_info?.variants) {
         videos = media.video_info.variants;
       }
 
-      if (!videos || videos.length === 0) {
-        continue; // 尝试下一个URL
-      }
+      if (!videos.length) continue;
 
-      // 找最高画质视频 - 过滤掉m3u8
       let bestVideo = null;
       let highestBitrate = 0;
 
       for (const video of videos) {
-        // 跳过m3u8播放列表
-        if (video.content_type === 'application/x-mpegURL' ||
-            video.type === 'application/x-mpegURL' ||
-            video.url?.includes('.m3u8')) {
+        if (video.content_type === 'application/x-mpegURL' || video.type === 'application/x-mpegURL' || video.url?.includes('.m3u8')) {
           continue;
         }
 
-        // 优先选择MP4
         if (video.content_type?.includes('mp4') || video.url?.includes('.mp4')) {
           const bitrate = video.bitrate || 0;
           if (bitrate > highestBitrate) {
@@ -364,28 +596,17 @@ async function fetchViaFixTweetAPI(tweetId) {
         }
       }
 
-      // 如果没找到MP4，尝试第一个非m3u8的视频
       if (!bestVideo) {
-        for (const video of videos) {
-          if (!video.url?.includes('.m3u8')) {
-            bestVideo = video;
-            break;
-          }
-        }
+        bestVideo = videos.find((video) => !video.url?.includes('.m3u8'));
       }
 
-      if (!bestVideo || !bestVideo.url) {
-        continue; // 尝试下一个URL
-      }
+      if (!bestVideo?.url) continue;
 
       log('FixTweet获取视频URL:', bestVideo.url);
-
       return { url: bestVideo.url, type: bestVideo.type || 'video' };
-
     } catch (e) {
       lastError = e;
       log('FixTweet URL尝试失败:', e.message);
-      continue; // 尝试下一个URL
     }
   }
 
@@ -393,21 +614,20 @@ async function fetchViaFixTweetAPI(tweetId) {
 }
 
 /**
- * 方案2: GraphQL API（需要登录）
+ * 方案3: GraphQL API（需要登录）
  */
 async function fetchViaGraphQLAPI(tweetId) {
   log('GraphQL API请求，ID:', tweetId);
-  
+
   const cookies = await chrome.cookies.getAll({ domain: 'x.com' });
   if (cookies.length === 0) {
     throw new Error('未登录');
   }
-  
-  const cookieString = cookies.map(c => `${c.name}=${c.value}`).join('; ');
-  const csrfCookie = cookies.find(c => c.name === 'ct0');
+
+  const cookieString = cookies.map((c) => `${c.name}=${c.value}`).join('; ');
+  const csrfCookie = cookies.find((c) => c.name === 'ct0');
   const csrfToken = csrfCookie ? csrfCookie.value : '';
-  
-  // 使用TweetDetail查询
+
   const variables = {
     focalTweetId: tweetId,
     with_rux_injections: false,
@@ -418,7 +638,7 @@ async function fetchViaGraphQLAPI(tweetId) {
     withVoice: false,
     withV2Timeline: false
   };
-  
+
   const features = {
     rweb_tipjar_consumption_enabled: false,
     responsive_web_graphql_exclude_directive_enabled: true,
@@ -443,9 +663,8 @@ async function fetchViaGraphQLAPI(tweetId) {
     longform_notetweets_inline_media_enabled: false,
     responsive_web_enhance_cards_enabled: false
   };
-  
+
   const url = `https://x.com/i/api/graphql/VWFGpvAGCtcBgsfgJLoWLA/TweetDetail?variables=${encodeURIComponent(JSON.stringify(variables))}&features=${encodeURIComponent(JSON.stringify(features))}`;
-  
   const response = await fetch(url, {
     method: 'GET',
     headers: {
@@ -457,22 +676,18 @@ async function fetchViaGraphQLAPI(tweetId) {
       'X-Twitter-Active-User': 'yes'
     }
   });
-  
+
   log('GraphQL响应状态:', response.status);
-  
   if (!response.ok) {
     throw new Error(`GraphQL API失败: ${response.status}`);
   }
-  
+
   const data = await response.json();
-  
-  // 从threaded_conversation_with_injections中提取
   const instructions = data?.data?.threaded_conversation_with_injections?.instructions;
   if (!instructions) {
     throw new Error('未找到推文数据');
   }
-  
-  // 遍历查找推文
+
   let tweetResult = null;
   for (const instruction of instructions) {
     if (instruction.type === 'TimelineAddEntries') {
@@ -485,23 +700,21 @@ async function fetchViaGraphQLAPI(tweetId) {
     }
     if (tweetResult) break;
   }
-  
+
   if (!tweetResult) {
     throw new Error('未找到推文');
   }
-  
-  // 获取视频
+
   const legacy = tweetResult.legacy || tweetResult;
   const media = legacy?.extended_entities?.media?.[0] || legacy?.entities?.media?.[0];
-  
   if (!media || !media.video_info) {
     throw new Error('未找到视频');
   }
-  
+
   const variants = media.video_info.variants;
   let bestVideo = null;
   let highestBitrate = 0;
-  
+
   for (const variant of variants) {
     if (variant.type === 'video/mp4') {
       const bitrate = variant.bitrate || 0;
@@ -511,17 +724,16 @@ async function fetchViaGraphQLAPI(tweetId) {
       }
     }
   }
-  
+
   if (!bestVideo) {
-    bestVideo = variants.find(v => v.type === 'video/mp4');
+    bestVideo = variants.find((variant) => variant.type === 'video/mp4');
   }
-  
+
   if (!bestVideo) {
     throw new Error('未找到MP4视频');
   }
-  
+
   log('GraphQL获取视频URL:', bestVideo.url);
-  
   return { url: bestVideo.url, bitrate: highestBitrate };
 }
 
@@ -531,20 +743,17 @@ async function fetchViaGraphQLAPI(tweetId) {
 async function parseM3u8(m3u8Url) {
   const response = await fetch(m3u8Url);
   const text = await response.text();
-  
   const lines = text.split('\n');
-  
-  // 直接找MP4
+
   for (const line of lines) {
     if (line.includes('.mp4') && line.startsWith('http')) {
       return line.trim();
     }
   }
-  
-  // 找最高带宽流
+
   let bestStream = null;
   let bestBandwidth = 0;
-  
+
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     if (line.startsWith('#EXT-X-STREAM-INF:')) {
@@ -561,7 +770,7 @@ async function parseM3u8(m3u8Url) {
       }
     }
   }
-  
+
   if (bestStream) {
     if (bestStream.startsWith('http')) {
       return bestStream;
@@ -569,18 +778,33 @@ async function parseM3u8(m3u8Url) {
     const baseUrl = m3u8Url.substring(0, m3u8Url.lastIndexOf('/') + 1);
     return baseUrl + bestStream;
   }
-  
+
   return null;
 }
 
-// 下载完成监听
 chrome.downloads.onChanged.addListener((delta) => {
+  if (!delta.state?.current && !delta.error?.current && !delta.filename?.current) return;
+
+  updateDownloadStatusByDownloadId(delta.id, {
+    fileName: delta.filename?.current ? delta.filename.current.split(/[\\/]/).pop() : undefined,
+    folder: delta.filename?.current ? delta.filename.current.replace(/\\/g, '/').split('/').slice(0, -1).join('/') : undefined,
+    targetPath: delta.filename?.current ? delta.filename.current.replace(/\\/g, '/') : undefined,
+    status: delta.state?.current === 'complete' ? 'completed' : delta.state?.current === 'interrupted' ? 'failed' : undefined,
+    message: delta.state?.current === 'complete'
+      ? '下载完成'
+      : delta.state?.current === 'interrupted'
+        ? `下载失败: ${delta.error?.current || 'interrupted'}`
+        : undefined,
+    error: delta.state?.current === 'interrupted' ? (delta.error?.current || 'interrupted') : undefined
+  }).catch((error) => {
+    logError('同步下载状态失败:', error.message);
+  });
+
   if (delta.state?.current === 'complete') {
     log('下载完成，ID:', delta.id);
   }
 });
 
-// 安装监听
 chrome.runtime.onInstalled.addListener((details) => {
   log('扩展已安装/更新:', details.reason);
   videoCache.clear();

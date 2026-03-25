@@ -373,6 +373,110 @@
       color: var(--twitter-red);
     }
 
+    .setting-desc-block {
+      line-height: 1.5;
+    }
+
+    .download-status-summary {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+    }
+
+    .download-summary-chip {
+      background: white;
+      border: 1px solid var(--twitter-border);
+      border-radius: 12px;
+      padding: 10px 12px;
+    }
+
+    .download-summary-chip.total {
+      grid-column: 1 / -1;
+    }
+
+    .download-summary-label {
+      font-size: 11px;
+      color: var(--twitter-gray);
+      margin-bottom: 4px;
+    }
+
+    .download-summary-value {
+      font-size: 18px;
+      font-weight: 700;
+      color: var(--twitter-black);
+    }
+
+    .download-status-updated {
+      margin-top: 10px;
+      font-size: 12px;
+      color: var(--twitter-gray);
+    }
+
+    .download-status-list {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .download-status-item {
+      background: white;
+      border: 1px solid var(--twitter-border);
+      border-radius: 12px;
+      padding: 10px 12px;
+    }
+
+    .download-status-item-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 6px;
+    }
+
+    .download-status-name {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--twitter-black);
+      word-break: break-all;
+    }
+
+    .download-status-meta,
+    .download-status-message,
+    .download-status-empty {
+      font-size: 12px;
+      color: var(--twitter-gray);
+      line-height: 1.5;
+      word-break: break-word;
+    }
+
+    .download-status-badge {
+      flex-shrink: 0;
+      border-radius: 999px;
+      padding: 3px 8px;
+      font-size: 11px;
+      font-weight: 600;
+    }
+
+    .download-status-badge.resolving {
+      background: rgba(29, 155, 240, 0.12);
+      color: var(--twitter-blue);
+    }
+
+    .download-status-badge.downloading {
+      background: rgba(255, 185, 0, 0.14);
+      color: #b77900;
+    }
+
+    .download-status-badge.completed {
+      background: rgba(0, 186, 124, 0.12);
+      color: var(--twitter-green);
+    }
+
+    .download-status-badge.failed {
+      background: rgba(244, 33, 46, 0.12);
+      color: var(--twitter-red);
+    }
+
     /* Footer */
     .footer {
       padding: 16px;
@@ -522,6 +626,12 @@
             <span class="slider-value" id="previewDelayValue">300ms</span>
           </div>
         </div>
+        <div class="setting-item" style="display: block;">
+          <div class="setting-info" style="margin-right: 0;">
+            <div class="setting-label">快捷操作</div>
+            <div class="setting-desc setting-desc-block">预览会跟随鼠标；空格可固定或恢复跟随，未固定时按住 Alt + 滚轮可缩放，固定后支持拖动、←→ 切换多图，ESC 关闭。</div>
+          </div>
+        </div>
 
       </div>
     </div>
@@ -541,6 +651,42 @@
             <option value="medium">Medium (600px)</option>
             <option value="small">Small (340px)</option>
           </select>
+        </div>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-title">下载状态</div>
+      <div class="settings-card">
+        <div class="setting-item" style="display: block;">
+          <div class="download-status-summary">
+            <div class="download-summary-chip">
+              <div class="download-summary-label">解析中</div>
+              <div class="download-summary-value" id="downloadStatusResolving">0</div>
+            </div>
+            <div class="download-summary-chip">
+              <div class="download-summary-label">下载中</div>
+              <div class="download-summary-value" id="downloadStatusDownloading">0</div>
+            </div>
+            <div class="download-summary-chip">
+              <div class="download-summary-label">已完成</div>
+              <div class="download-summary-value" id="downloadStatusCompleted">0</div>
+            </div>
+            <div class="download-summary-chip">
+              <div class="download-summary-label">失败</div>
+              <div class="download-summary-value" id="downloadStatusFailed">0</div>
+            </div>
+            <div class="download-summary-chip total">
+              <div class="download-summary-label">最近记录总数</div>
+              <div class="download-summary-value" id="downloadStatusTotal">0</div>
+            </div>
+          </div>
+          <div class="download-status-updated" id="downloadStatusUpdated">暂无下载记录</div>
+        </div>
+        <div class="setting-item" style="display: block;">
+          <div class="download-status-list" id="downloadStatusList">
+            <div class="download-status-empty">暂无下载记录</div>
+          </div>
         </div>
       </div>
     </div>
@@ -578,7 +724,46 @@
             <option value="4096x4096">4096x4096</option>
             <option value="large">Large</option>
             <option value="medium">Medium</option>
+            <option value="small">Small</option>
           </select>
+        </div>
+        <div class="setting-item">
+          <div class="setting-info">
+            <div class="setting-label">开始日期</div>
+            <div class="setting-desc">只下载此日期之后的媒体</div>
+          </div>
+          <input class="setting-select" id="batchDateStart" type="date">
+        </div>
+        <div class="setting-item">
+          <div class="setting-info">
+            <div class="setting-label">结束日期</div>
+            <div class="setting-desc">只下载此日期之前的媒体</div>
+          </div>
+          <input class="setting-select" id="batchDateEnd" type="date">
+        </div>
+        <div class="setting-item">
+          <div class="setting-info">
+            <div class="setting-label">保存路径模板</div>
+            <div class="setting-desc">相对下载目录，支持 {date} {time} {id} {user}，例如 X_Downloads/{user}</div>
+          </div>
+        </div>
+        <div class="setting-item" style="display: block;">
+          <input class="setting-select" id="batchPathTemplate" type="text" value="X_Downloads/{user}" style="width: 100%; min-width: 0;">
+        </div>
+        <div class="setting-item">
+          <div class="setting-info">
+            <div class="setting-label">文件名模板</div>
+            <div class="setting-desc">支持 {date} {time} {id} {user}，示例：{date}_{id}</div>
+          </div>
+        </div>
+        <div class="setting-item" style="display: block;">
+          <input class="setting-select" id="batchNameTemplate" type="text" value="{date}_{id}" style="width: 100%; min-width: 0;">
+        </div>
+        <div class="setting-item" style="display: block; align-items: flex-start;">
+          <div class="setting-info" style="margin-right: 0;">
+            <div class="setting-label">模板预览</div>
+            <div class="setting-desc" id="batchTemplatePreview">X_Downloads/user/20260325_1234567890.png</div>
+          </div>
         </div>
       </div>
     </div>

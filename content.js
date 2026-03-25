@@ -2,6 +2,58 @@
 (function () {
   'use strict';
 
+  function getDefaultBatchSettings() {
+    return {
+      types: { image: true, video: true, gif: true },
+      quality: '4096x4096',
+      dateRange: { start: '', end: '' },
+      pathTemplate: 'X_Downloads/{user}',
+      nameTemplate: '{date}_{id}'
+    };
+  }
+
+  function cloneBatchSettings(settings = getDefaultBatchSettings()) {
+    return {
+      types: {
+        image: settings.types?.image !== false,
+        video: settings.types?.video !== false,
+        gif: settings.types?.gif !== false
+      },
+      quality: settings.quality || '4096x4096',
+      dateRange: {
+        start: settings.dateRange?.start || '',
+        end: settings.dateRange?.end || ''
+      },
+      pathTemplate: settings.pathTemplate || 'X_Downloads/{user}',
+      nameTemplate: settings.nameTemplate || '{date}_{id}'
+    };
+  }
+
+  function sanitizeBatchTemplateValue(value, fallbackValue) {
+    const normalized = typeof value === 'string' ? value.trim() : '';
+    return normalized || fallbackValue;
+  }
+
+  function normalizeBatchSettings(rawSettings, fallbackQuality = '4096x4096') {
+    const defaults = getDefaultBatchSettings();
+    const raw = rawSettings || {};
+
+    return {
+      types: {
+        image: raw.types?.image !== false,
+        video: raw.types?.video !== false,
+        gif: raw.types?.gif !== false
+      },
+      quality: sanitizeBatchTemplateValue(raw.quality, fallbackQuality || defaults.quality),
+      dateRange: {
+        start: typeof raw.dateRange?.start === 'string' ? raw.dateRange.start : defaults.dateRange.start,
+        end: typeof raw.dateRange?.end === 'string' ? raw.dateRange.end : defaults.dateRange.end
+      },
+      pathTemplate: sanitizeBatchTemplateValue(raw.pathTemplate, defaults.pathTemplate),
+      nameTemplate: sanitizeBatchTemplateValue(raw.nameTemplate, defaults.nameTemplate)
+    };
+  }
+
   // 默认设置
   let userSettings = {
     imageQuality: '4096x4096',
@@ -12,8 +64,20 @@
     previewDelay: 300,
     previewTriggerMode: 'auto',  // 'auto' = 自动显示, 'key' = 按键触发
     previewTriggerKey: 'shift',  // shift, alt, ctrl
-    previewFollowMouse: true     // 预览窗口始终跟随鼠标移动
+    previewFollowMouse: true,    // 预览窗口始终跟随鼠标移动
+    batchSettings: getDefaultBatchSettings()
   };
+
+  function persistBatchSettings(settings, callback) {
+    const normalized = normalizeBatchSettings(settings, userSettings.imageQuality);
+    chrome.storage.sync.set({ batchSettings: normalized }, () => {
+      userSettings.batchSettings = normalized;
+      if (typeof BatchDownloader !== 'undefined') {
+        BatchDownloader.config = cloneBatchSettings(normalized);
+      }
+      callback?.(normalized);
+    });
+  }
 
   // 加载用户设置
   function loadSettings() {
@@ -26,20 +90,30 @@
       previewDelay: 300,
       previewTriggerMode: 'auto',
       previewTriggerKey: 'shift',
-      previewFollowMouse: true
+      previewFollowMouse: true,
+      batchSettings: getDefaultBatchSettings()
     }, (items) => {
-      userSettings = items;
+      const batchSettings = normalizeBatchSettings(items.batchSettings, items.imageQuality);
+      userSettings = { ...items, batchSettings };
       userSettings.previewFollowMouse = true; // 始终强制跟随鼠标
       CONFIG.PREVIEW_DELAY = userSettings.previewDelay;
+
+      if (typeof BatchDownloader !== 'undefined') {
+        BatchDownloader.config = cloneBatchSettings(batchSettings);
+      }
     });
   }
 
   // 监听设置更新消息
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message.action === 'settingsUpdated') {
-      userSettings = message.settings;
+      const batchSettings = normalizeBatchSettings(message.settings?.batchSettings, message.settings?.imageQuality || userSettings.imageQuality);
+      userSettings = { ...userSettings, ...message.settings, batchSettings };
       userSettings.previewFollowMouse = true; // 始终强制跟随鼠标
       CONFIG.PREVIEW_DELAY = userSettings.previewDelay;
+      if (typeof BatchDownloader !== 'undefined') {
+        BatchDownloader.config = cloneBatchSettings(batchSettings);
+      }
     }
     // 处理批量下载消息
     if (message.action === 'batchDownload') {
@@ -230,6 +304,99 @@
     }
 
     return null;
+  }
+
+  function sanitizePathSegment(value, fallback = 'unknown') {
+    const sanitized = String(value || '')
+      .replace(/[<>:"\\|?*\x00-\x1F]/g, '_')
+      .replace(/[. ]+$/g, '')
+      .trim();
+    return sanitized || fallback;
+  }
+
+  function sanitizeRelativePath(path, fallback = 'X_Downloads/unknown') {
+    const normalized = String(path || '')
+      .replace(/\\+/g, '/')
+      .replace(/^\/+|\/+$/g, '');
+
+    const segments = normalized
+      .split('/')
+      .map((segment) => sanitizePathSegment(segment, 'unknown'))
+      .filter(Boolean);
+
+    return segments.length ? segments.join('/') : fallback;
+  }
+
+  function replaceTemplateTokens(template, tokens) {
+    return String(template || '').replace(/\{(date|time|id|user)\}/g, (_, token) => tokens[token] || 'unknown');
+  }
+
+  function getItemUserName(element) {
+    const article = element?.closest?.('article') || element;
+    const links = article?.querySelectorAll?.('a[href*="/status/"]') || [];
+
+    for (const link of links) {
+      const match = link.getAttribute('href')?.match(/^\/([^/]+)\/status\/\d+/);
+      if (match?.[1]) return sanitizePathSegment(match[1]);
+    }
+
+    const pathMatch = window.location.pathname.match(/^\/([^/]+)/);
+    if (pathMatch?.[1] && !['home', 'explore', 'notifications', 'messages', 'search', 'settings'].includes(pathMatch[1])) {
+      return sanitizePathSegment(pathMatch[1]);
+    }
+
+    return 'unknown';
+  }
+
+  function matchesBatchDateRange(item, dateRange) {
+    if (!item?.date || !(item.date instanceof Date) || Number.isNaN(item.date.getTime())) {
+      return true;
+    }
+
+    if (dateRange?.start) {
+      const startDate = new Date(dateRange.start);
+      if (!Number.isNaN(startDate.getTime()) && item.date < startDate) {
+        return false;
+      }
+    }
+
+    if (dateRange?.end) {
+      const endDate = new Date(dateRange.end);
+      if (!Number.isNaN(endDate.getTime())) {
+        endDate.setHours(23, 59, 59, 999);
+        if (item.date > endDate) {
+          return false;
+        }
+      }
+    }
+
+    return true;
+  }
+
+  function resolveBatchDownloadTarget(item, config, fallbackUserName = 'unknown') {
+    const date = item?.date instanceof Date && !Number.isNaN(item.date.getTime()) ? item.date : new Date();
+    const yyyy = date.getFullYear();
+    const mm = String(date.getMonth() + 1).padStart(2, '0');
+    const dd = String(date.getDate()).padStart(2, '0');
+    const dateStr = `${yyyy}${mm}${dd}`;
+    const timeStr = `${String(date.getHours()).padStart(2, '0')}${String(date.getMinutes()).padStart(2, '0')}${String(date.getSeconds()).padStart(2, '0')}`;
+    const user = sanitizePathSegment(item?.userName || fallbackUserName || 'unknown');
+    const id = sanitizePathSegment(item?.tweetId || item?.id || 'unknown');
+    const tokens = { date: dateStr, time: timeStr, id, user };
+
+    const folder = sanitizeRelativePath(replaceTemplateTokens(config.pathTemplate, tokens), `X_Downloads/${user}`);
+    const baseName = sanitizePathSegment(replaceTemplateTokens(config.nameTemplate, tokens), `${dateStr}_${id}`);
+    const extension = item.type === 'image'
+      ? (item.url?.includes('format=png') ? 'png' : 'jpg')
+      : 'mp4';
+
+    return {
+      folder,
+      filename: `${baseName}.${extension}`,
+      baseName,
+      extension,
+      user
+    };
   }
 
   /**
@@ -425,13 +592,13 @@
       btn.addEventListener('click', (e) => {
         e.preventDefault();
         e.stopPropagation();
-        downloadImage(imageUrl, '4096x4096');
+        downloadImage(imageUrl, '4096x4096', 'manual');
       });
     } else if ((isGif || isVideo) && videoElement) {
       btn.addEventListener('click', (e) => {
         e.preventDefault();
         e.stopPropagation();
-        handleVideoDownload(videoElement, btn, isGif);
+        handleVideoDownload(videoElement, btn, isGif, 'manual');
       });
     }
 
@@ -463,7 +630,7 @@
       item.addEventListener('click', (e) => {
         e.preventDefault();
         e.stopPropagation();
-        downloadImage(imageUrl, option.name);
+        downloadImage(imageUrl, option.name, 'manual');
         hideQualityMenu();
       });
       menu.appendChild(item);
@@ -507,7 +674,7 @@
   /**
    * 下载图片
    */
-  function downloadImage(imageUrl, quality) {
+  function downloadImage(imageUrl, quality, source = 'manual') {
     if (!quality) {
       quality = getImageQuality();
     }
@@ -516,7 +683,8 @@
       chrome.runtime.sendMessage({
         action: 'downloadImage',
         url: downloadUrl,
-        filename: getFileName(imageUrl, quality)
+        filename: getFileName(imageUrl, quality),
+        source
       }, (response) => {
         showNotification(response?.success ? `开始下载 ${quality} 画质图片...` : '下载失败', response?.success ? 'success' : 'error');
       });
@@ -526,21 +694,22 @@
   /**
    * 处理视频下载
    */
-  function handleVideoDownload(videoElement, btn, isGif = false) {
+  function handleVideoDownload(videoElement, btn, isGif = false, source = 'manual') {
     const originalContent = btn.innerHTML;
     btn.innerHTML = `<svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor" class="x-loading-spinner"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="2" fill="none" stroke-dasharray="31.4 31.4" stroke-linecap="round"><animateTransform attributeName="transform" type="rotate" from="0 12 12" to="360 12 12" dur="1s" repeatCount="indefinite"/></circle></svg>`;
 
     const tweetId = extractTweetId(videoElement);
     const directVideoUrl = getVideoPlaylistUrl(videoElement);
 
-    console.log('[X下载器] 请求:', { tweetId, directVideoUrl, isGif });
+    console.log('[X下载器] 请求:', { tweetId, directVideoUrl, isGif, source });
 
     chrome.runtime.sendMessage({
       action: 'downloadVideo',
       tweetId: tweetId,
       directVideoUrl: directVideoUrl,
       pageUrl: window.location.href,
-      isGif: isGif
+      isGif: isGif,
+      source
     }, (response) => {
       btn.innerHTML = originalContent;
       console.log('[X下载器] 响应:', response);
@@ -567,6 +736,21 @@
           <video class="x-preview-gif" src="" autoplay loop muted playsinline style="display:none;"></video>
           <div class="x-preview-loading"><div class="x-preview-spinner"></div><span>加载中...</span></div>
           <div class="x-preview-scale-info" style="display:none;">100%</div>
+          <div class="x-preview-actions-follow" style="display:none;">
+            <button class="x-preview-btn x-preview-prev" title="上一张 (←)">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M15.41 7.41 14 6l-6 6 6 6 1.41-1.41L10.83 12z"/></svg>
+            </button>
+            <button class="x-preview-btn x-preview-download" title="下载">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
+            </button>
+            <button class="x-preview-btn x-preview-close" title="关闭 (ESC)">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+            </button>
+            <button class="x-preview-btn x-preview-next" title="下一张 (→)">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="m8.59 16.59 1.41 1.41 6-6-6-6-1.41 1.41L13.17 12z"/></svg>
+            </button>
+          </div>
+          <div class="x-preview-follow-hint">空格固定 | Alt+滚轮缩放</div>
         </div>
       `;
     } else {
@@ -658,10 +842,12 @@
           e.preventDefault();
           e.stopPropagation();
           if (currentPreviewImg) {
-            downloadImage(currentPreviewImg, '4096x4096');
+            downloadImage(currentPreviewImg, '4096x4096', 'manual');
           }
         });
       }
+
+      updatePreviewHint();
 
       if (prevBtn) {
         prevBtn.addEventListener('click', (e) => {
@@ -712,7 +898,7 @@
         item.textContent = option.label;
         item.addEventListener('click', (e) => {
           e.stopPropagation();
-          if (currentPreviewImg) downloadImage(currentPreviewImg, option.name);
+          if (currentPreviewImg) downloadImage(currentPreviewImg, option.name, 'manual');
         });
         qualityMenu.appendChild(item);
       });
@@ -727,7 +913,7 @@
 
     downloadBtn.addEventListener('click', (e) => {
       e.stopPropagation();
-      if (currentPreviewImg) downloadImage(currentPreviewImg, '4096x4096');
+      if (currentPreviewImg) downloadImage(currentPreviewImg, '4096x4096', 'manual');
     });
 
     // 拖动功能
@@ -836,6 +1022,7 @@
     // 立即显示，无需动画
     preview.classList.add('x-preview-visible');
     isPreviewVisible = true;
+    updatePreviewHint();
   }
 
   /**
@@ -1325,7 +1512,8 @@
                 tweetId: tweetId,
                 directVideoUrl: directVideoUrl,
                 pageUrl: window.location.href,
-                isGif: isGif
+                isGif: isGif,
+                source: 'manual'
               }, (response) => {
                 showNotification(response?.success ? '开始下载...' : (response?.error || '下载失败'), response?.success ? 'success' : 'error');
               });
@@ -1409,50 +1597,71 @@
    * 批量下载澶勭悊
    */
   function handleBatchDownload(filters) {
-    const { mediaTypes, quality, dateRange } = filters;
+    const batchSettings = normalizeBatchSettings(filters, userSettings.imageQuality);
+    if (!batchSettings.types.image && !batchSettings.types.video && !batchSettings.types.gif) {
+      showNotification('请至少选择一种媒体类型', 'error');
+      return;
+    }
+
+    persistBatchSettings(batchSettings);
+
     const results = [];
 
     // 扫描所有媒体
     const images = document.querySelectorAll('img[src*="pbs.twimg.com/media"]');
     const videos = document.querySelectorAll('video');
 
-    images.forEach((img, index) => {
-      if (mediaTypes.includes('image') && img.src.includes('pbs.twimg.com/media')) {
-        const url = getImageUrl(img.src, quality) || img.src;
-        results.push({
-          type: 'image',
-          url: url,
-          filename: getFileName(img.src, quality)
-        });
-      }
+    images.forEach((img) => {
+      if (!batchSettings.types.image || !img.src.includes('pbs.twimg.com/media')) return;
+
+      const article = img.closest('article');
+      const dateValue = article?.querySelector('time')?.getAttribute('datetime');
+      const date = dateValue ? new Date(dateValue) : new Date();
+      const tweetId = extractTweetId(img);
+      const url = getImageUrl(img.src, batchSettings.quality) || img.src;
+
+      results.push({
+        type: 'image',
+        url,
+        date,
+        tweetId,
+        userName: BatchDownloader.getUserNameFromItem(img)
+      });
     });
 
     videos.forEach((video) => {
+      const article = video.closest('article');
+      const dateValue = article?.querySelector('time')?.getAttribute('datetime');
+      const date = dateValue ? new Date(dateValue) : new Date();
+      const tweetId = extractTweetId(video);
       const isGif = isGifVideo(video);
-      if (isGif && mediaTypes.includes('gif')) {
+
+      if (isGif && batchSettings.types.gif) {
         const videoUrl = getVideoPlaylistUrl(video);
         if (videoUrl) {
           results.push({
             type: 'gif',
             url: videoUrl,
-            filename: `gif_${Date.now()}.mp4`
+            date,
+            tweetId,
+            userName: BatchDownloader.getUserNameFromItem(video)
           });
         }
-      } else if (!isGif && mediaTypes.includes('video')) {
-        const tweetId = extractTweetId(video);
-        if (tweetId) {
-          results.push({
-            type: 'video',
-            tweetId: tweetId,
-            filename: `video_${tweetId}.mp4`
-          });
-        }
+      } else if (!isGif && batchSettings.types.video && tweetId) {
+        results.push({
+          type: 'video',
+          tweetId,
+          date,
+          userName: BatchDownloader.getUserNameFromItem(video)
+        });
       }
     });
 
+    const filteredResults = results.filter((item) => BatchDownloader.matchesDateRange(item, batchSettings.dateRange));
+
     // 发送下载任务
     let completed = 0;
-    const total = results.length;
+    const total = filteredResults.length;
 
     if (total === 0) {
       showNotification('未找到符合条件的媒体', 'error');
@@ -1461,22 +1670,9 @@
 
     showNotification(`开始批量下载 ${total} 个文件...`, 'success');
 
-    results.forEach((item, index) => {
+    filteredResults.forEach((item, index) => {
       setTimeout(() => {
-        if (item.type === 'image' || item.type === 'gif') {
-          chrome.runtime.sendMessage({
-            action: 'downloadImage',
-            url: item.url,
-            filename: item.filename
-          });
-        } else if (item.type === 'video') {
-          chrome.runtime.sendMessage({
-            action: 'downloadVideo',
-            tweetId: item.tweetId,
-            pageUrl: window.location.href,
-            isGif: false
-          });
-        }
+        BatchDownloader.triggerDownload(item, batchSettings);
 
         completed++;
         if (completed === total) {
@@ -1741,13 +1937,7 @@
       mediaMap: new Map() // url -> {filename, type, tweetId}
     },
 
-    config: {
-      types: { image: true, video: true, gif: true },
-      quality: '4096x4096',
-      dateRange: { start: '', end: '' },
-      pathTemplate: 'X_Downloads/{user}',
-      nameTemplate: '{date}_{id}'
-    },
+    config: cloneBatchSettings(userSettings.batchSettings),
 
     ui: {
       btn: null,
@@ -1983,7 +2173,7 @@
         .x-batch-inline { display: flex; gap: 10px; align-items: center; width: 100%; }
         .x-batch-inline > * { flex: 1; }
         .x-batch-checkbox { margin-right: 6px; }
-        .x-batch-help { font-size: 12px; color: #597a96; margin-top: 6px; }
+        .x-batch-help { font-size: 12px; color: #597a96; margin-top: 6px; word-break: break-all; }
         .x-batch-status {
           margin-top: 14px;
           display: none;
@@ -2212,6 +2402,7 @@
                 <input type="text" class="x-batch-input" id="batch-path" value="${this.config.pathTemplate}">
               </div>
             </div>
+            <div class="x-batch-help">支持变量: {date}, {time}, {id}, {user}</div>
           </div>
 
           <div class="x-batch-group">
@@ -2221,7 +2412,16 @@
                 <input type="text" class="x-batch-input" id="batch-name" value="${this.config.nameTemplate}">
               </div>
             </div>
-            <div class="x-batch-help">支持变量: {date}, {time}, {id}, {user}</div>
+            <div class="x-batch-help">示例: {date}_{id}</div>
+          </div>
+
+          <div class="x-batch-group">
+            <label class="x-batch-label">模板预览</label>
+            <div class="x-batch-card">
+              <div class="x-batch-row">
+                <div class="x-batch-help" id="batch-preview-text">下载后将显示在这里</div>
+              </div>
+            </div>
           </div>
 
           <div id="batch-status" class="x-batch-status">
@@ -2248,6 +2448,65 @@
       modal.querySelector('#batch-cancel').onclick = () => this.closeModal();
       modal.querySelector('#batch-start').onclick = () => this.toggleScan();
       this.setupQualitySelect(modal);
+      this.bindTemplatePreview(modal);
+      this.updateTemplatePreview(modal);
+    },
+
+    bindTemplatePreview(modal) {
+      const pathInput = modal.querySelector('#batch-path');
+      const nameInput = modal.querySelector('#batch-name');
+      if (!pathInput || !nameInput) return;
+
+      const updatePreview = () => this.updateTemplatePreview(modal);
+      pathInput.addEventListener('input', updatePreview);
+      nameInput.addEventListener('input', updatePreview);
+    },
+
+    updateTemplatePreview(modal) {
+      const previewText = modal.querySelector('#batch-preview-text');
+      const pathInput = modal.querySelector('#batch-path');
+      const nameInput = modal.querySelector('#batch-name');
+      if (!previewText || !pathInput || !nameInput) return;
+
+      const previewConfig = normalizeBatchSettings({
+        ...this.config,
+        pathTemplate: pathInput.value,
+        nameTemplate: nameInput.value
+      }, this.config.quality);
+
+      const sample = resolveBatchDownloadTarget({
+        type: 'image',
+        url: 'https://pbs.twimg.com/media/sample?format=png&name=4096x4096',
+        tweetId: '1234567890',
+        date: new Date('2026-03-25T12:34:56Z'),
+        userName: this.state.userName || 'user'
+      }, previewConfig, this.state.userName || 'user');
+
+      previewText.textContent = `${sample.folder}/${sample.filename}`;
+    },
+
+    validateConfig(config) {
+      if (!config.types.image && !config.types.video && !config.types.gif) {
+        return '请至少选择一种媒体类型';
+      }
+
+      if (config.dateRange.start && config.dateRange.end && new Date(config.dateRange.start) > new Date(config.dateRange.end)) {
+        return '开始日期不能晚于结束日期';
+      }
+
+      return null;
+    },
+
+    getUserNameFromItem(element) {
+      return getItemUserName(element);
+    },
+
+    matchesDateRange(item, dateRange) {
+      return matchesBatchDateRange(item, dateRange);
+    },
+
+    resolveDownloadTarget(item, config = this.config) {
+      return resolveBatchDownloadTarget(item, config, item?.userName || this.state.userName || 'unknown');
     },
 
     setupQualitySelect(modal) {
@@ -2319,20 +2578,30 @@
         return;
       }
 
-      // Read config
-      this.config.types.image = this.ui.modal.querySelector('#batch-type-img').checked;
-      this.config.types.video = this.ui.modal.querySelector('#batch-type-video').checked;
-      this.config.types.gif = this.ui.modal.querySelector('#batch-type-gif').checked;
-      this.config.quality = this.ui.modal.querySelector('#batch-quality').value;
-      this.config.dateRange.start = this.ui.modal.querySelector('#batch-date-start').value;
-      this.config.dateRange.end = this.ui.modal.querySelector('#batch-date-end').value;
-      this.config.pathTemplate = this.ui.modal.querySelector('#batch-path').value;
-      this.config.nameTemplate = this.ui.modal.querySelector('#batch-name').value;
+      const nextConfig = normalizeBatchSettings({
+        types: {
+          image: this.ui.modal.querySelector('#batch-type-img').checked,
+          video: this.ui.modal.querySelector('#batch-type-video').checked,
+          gif: this.ui.modal.querySelector('#batch-type-gif').checked
+        },
+        quality: this.ui.modal.querySelector('#batch-quality').value,
+        dateRange: {
+          start: this.ui.modal.querySelector('#batch-date-start').value,
+          end: this.ui.modal.querySelector('#batch-date-end').value
+        },
+        pathTemplate: this.ui.modal.querySelector('#batch-path').value,
+        nameTemplate: this.ui.modal.querySelector('#batch-name').value
+      }, userSettings.imageQuality);
 
-      if (!this.config.types.image && !this.config.types.video && !this.config.types.gif) {
-        alert('请至少选择一种媒体类型');
+      const validationError = this.validateConfig(nextConfig);
+      if (validationError) {
+        alert(validationError);
         return;
       }
+
+      this.config = cloneBatchSettings(nextConfig);
+      persistBatchSettings(this.config);
+      this.updateTemplatePreview(this.ui.modal);
 
       this.state.scanning = true;
       this.state.stopping = false;
@@ -2429,17 +2698,7 @@
         this.state.scannedCount++;
         const key = item.url || (item.tweetId + item.type); // Unique key
         if (this.state.mediaMap.has(key)) return;
-
-        // Date Filter
-        if (this.config.dateRange.start) {
-          const startDate = new Date(this.config.dateRange.start);
-          if (item.date < startDate) return; // Skip logic handled in loop, but double check here
-        }
-        if (this.config.dateRange.end) {
-          const endDate = new Date(this.config.dateRange.end);
-          endDate.setHours(23, 59, 59);
-          if (item.date > endDate) return;
-        }
+        if (!this.matchesDateRange(item, this.config.dateRange)) return;
 
         this.state.mediaMap.set(key, item);
         this.state.downloadCount++;
@@ -2460,48 +2719,43 @@
       return date < new Date(this.config.dateRange.start);
     },
 
-    triggerDownload(item) {
-      const filename = this.formatFilename(item);
-      const folder = this.config.pathTemplate.replace('{user}', this.state.userName);
+    triggerDownload(item, config = this.config) {
+      const target = this.resolveDownloadTarget(item, config);
 
       if (item.type === 'image') {
         chrome.runtime.sendMessage({
           action: 'downloadImage',
           url: item.url,
-          filename: filename + (item.url.includes('format=png') ? '.png' : '.jpg'),
-          folder: folder
+          filename: target.filename,
+          folder: target.folder,
+          source: config === this.config ? 'batch' : 'quick-batch'
         });
       } else if (item.type === 'gif') {
         chrome.runtime.sendMessage({
           action: 'downloadVideo',
           directVideoUrl: item.url,
           tweetId: item.tweetId,
+          pageUrl: window.location.href,
           isGif: true,
-          folder: folder
+          filename: target.filename,
+          folder: target.folder,
+          source: config === this.config ? 'batch' : 'quick-batch'
         });
       } else if (item.type === 'video') {
         chrome.runtime.sendMessage({
           action: 'downloadVideo',
           tweetId: item.tweetId,
+          pageUrl: window.location.href,
           isGif: false,
-          folder: folder
+          filename: target.filename,
+          folder: target.folder,
+          source: config === this.config ? 'batch' : 'quick-batch'
         });
       }
     },
 
     formatFilename(item) {
-      const yyyy = item.date.getFullYear();
-      const mm = String(item.date.getMonth() + 1).padStart(2, '0');
-      const dd = String(item.date.getDate()).padStart(2, '0');
-      const dateStr = `${yyyy}${mm}${dd}`;
-      const timeStr = item.date.toTimeString().split(' ')[0].replace(/:/g, '');
-
-      let name = this.config.nameTemplate;
-      name = name.replace('{date}', dateStr);
-      name = name.replace('{time}', timeStr);
-      name = name.replace('{id}', item.tweetId || 'unknown');
-      name = name.replace('{user}', this.state.userName);
-      return name;
+      return this.resolveDownloadTarget(item).baseName;
     }
   };
 
